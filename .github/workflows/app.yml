@@ -1,0 +1,67 @@
+name: app-build-scan-push-deploy
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "tasky-main/**"
+      - ".github/workflows/app.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_scan_push_deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS creds (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image URI
+        run: |
+          IMAGE_URI="${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO_NAME }}:${{ github.sha }}"
+          echo "IMAGE_URI=${IMAGE_URI}" >> $GITHUB_ENV
+
+      - name: Build image (runner Docker)
+        run: |
+          docker build -t "${IMAGE_URI}" ./tasky-main
+
+      - name: Trivy scan image (fail HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMAGE_URI }}
+          format: table
+          exit-code: "1"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+
+      - name: Push image
+        run: docker push "${IMAGE_URI}"
+
+      # Deploy by updating the tag Terraform uses for kubernetes_deployment.tasky
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init + apply (update image tag)
+        working-directory: terraform
+        run: |
+          terraform init -input=false
+          terraform apply -auto-approve -input=false -var="tasky_image_tag=${{ github.sha }}"
