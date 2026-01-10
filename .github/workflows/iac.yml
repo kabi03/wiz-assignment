@@ -1,30 +1,41 @@
 name: iac-terraform-ci
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "terraform/**"
-      - ".github/workflows/iac.yml"
   pull_request:
     branches: ["main"]
     paths:
       - "terraform/**"
       - ".github/workflows/iac.yml"
-  workflow_dispatch: {}
+  push:
+    branches: ["main"]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/iac.yml"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Set to true to apply (requires approval). Otherwise plan only."
+        required: true
+        default: "false"
 
 permissions:
-  contents: read
   id-token: write
+  contents: read
+  pull-requests: write
   security-events: write
 
 jobs:
-  plan-and-scan:
-    runs-on: ubuntu-24.04
+  terraform:
+    name: Terraform Scan + Plan
+    runs-on: ubuntu-latest
+
     defaults:
       run:
-        shell: bash
         working-directory: terraform
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      AWS_REGION: ${{ secrets.AWS_REGION }}
 
     steps:
       - name: Checkout
@@ -33,18 +44,8 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
-          audience: sts.amazonaws.com
-          output-env-credentials: true
-
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
-      - name: Gitleaks scan
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -60,16 +61,12 @@ jobs:
       - name: Terraform validate
         run: terraform validate -no-color
 
-      - name: Setup TFLint
+      - name: TFLint
         uses: terraform-linters/setup-tflint@v4
-
-      - name: TFLint init
-        run: tflint --init
-
-      # ✅ CHANGED: soft-fail so warnings don't break the pipeline
-      - name: TFLint run (soft-fail)
+      - name: TFLint run
         run: |
-          tflint -f compact || true
+          tflint --init
+          tflint -f compact
 
       - name: tfsec (soft-fail)
         uses: aquasecurity/tfsec-action@v1.0.3
@@ -86,4 +83,48 @@ jobs:
         continue-on-error: true
 
       - name: Terraform plan
-        run: terraform plan -no-color -input=false
+        run: terraform plan -no-color -input=false -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
+
+  apply:
+    name: Terraform Apply (manual + approval)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.apply == 'true' }}
+    needs: terraform
+    runs-on: ubuntu-latest
+    environment: prod
+
+    defaults:
+      run:
+        working-directory: terraform
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve tfplan

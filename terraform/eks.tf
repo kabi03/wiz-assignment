@@ -61,6 +61,11 @@ resource "aws_eks_cluster" "this" {
     security_group_ids      = [aws_security_group.eks_cluster.id]
   }
 
+  access_config {
+    authentication_mode                         = "CONFIG_MAP"
+    bootstrap_cluster_creator_admin_permissions = true
+  }
+
   # Control plane logging to CloudWatch (great for the Cloud Native Security requirement)
   enabled_cluster_log_types = [
     "api",
