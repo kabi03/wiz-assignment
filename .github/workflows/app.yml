@@ -13,14 +13,14 @@ on:
       - ".github/workflows/app.yml"
   workflow_dispatch: {}
 
-permissions:
-  id-token: write
-  contents: read
-  security-events: write
-
 jobs:
   build_scan_push_deploy:
     runs-on: ubuntu-latest
+
+    permissions:
+      id-token: write
+      contents: read
+      security-events: write
 
     env:
       AWS_REGION: ${{ secrets.AWS_REGION }}
@@ -31,6 +31,18 @@ jobs:
       CONTAINER_NAME: tasky
 
     steps:
+      - name: Fail fast if required secrets are missing
+        run: |
+          if [ -z "${{ secrets.AWS_REGION }}" ]; then
+            echo "Missing required secret: AWS_REGION"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+          echo "Secrets look present (values are masked)."
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -39,6 +51,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
@@ -63,8 +76,6 @@ jobs:
           context: ./tasky-main
           file: ./tasky-main/Dockerfile
           push: true
-          build-args: |
-            GIT_SHA=${{ github.sha }}
           tags: |
             ${{ steps.img.outputs.image }}
             ${{ steps.img.outputs.image }}-latest

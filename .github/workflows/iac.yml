@@ -18,16 +18,17 @@ on:
         required: true
         default: "false"
 
-permissions:
-  id-token: write
-  contents: read
-  pull-requests: write
-  security-events: write
-
 jobs:
   terraform:
     name: Terraform Scan + Plan
     runs-on: ubuntu-latest
+
+    # IMPORTANT: set permissions at JOB level so id-token definitely applies
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+      security-events: write
 
     defaults:
       run:
@@ -38,6 +39,18 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION }}
 
     steps:
+      - name: Fail fast if required secrets are missing
+        run: |
+          if [ -z "${{ secrets.AWS_REGION }}" ]; then
+            echo "Missing required secret: AWS_REGION"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+          echo "Secrets look present (values are masked)."
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -46,6 +59,10 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -63,6 +80,7 @@ jobs:
 
       - name: TFLint
         uses: terraform-linters/setup-tflint@v4
+
       - name: TFLint run
         run: |
           tflint --init
@@ -98,11 +116,26 @@ jobs:
     runs-on: ubuntu-latest
     environment: prod
 
+    permissions:
+      id-token: write
+      contents: read
+
     defaults:
       run:
         working-directory: terraform
 
     steps:
+      - name: Fail fast if required secrets are missing
+        run: |
+          if [ -z "${{ secrets.AWS_REGION }}" ]; then
+            echo "Missing required secret: AWS_REGION"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -111,6 +144,7 @@ jobs:
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
+          audience: sts.amazonaws.com
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
