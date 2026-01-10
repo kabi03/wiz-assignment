@@ -1,11 +1,10 @@
 resource "null_resource" "mongo_backup_cron" {
-  depends_on = [
-    aws_instance.mongo
-  ]
+  depends_on = [aws_instance.mongo]
 
   triggers = {
     instance_id = aws_instance.mongo.id
     bucket      = aws_s3_bucket.public_backups.bucket
+    script_sha1 = filesha1("${path.module}/scripts/mongo_backup_cron.sh")
   }
 
   connection {
@@ -23,7 +22,7 @@ resource "null_resource" "mongo_backup_cron" {
   provisioner "remote-exec" {
     inline = [
       "chmod +x /tmp/mongo_backup_cron.sh",
-      "sudo MONGO_APP_PASSWORD='${random_password.mongo_app.result}' BACKUP_BUCKET='${aws_s3_bucket.public_backups.bucket}' /tmp/mongo_backup_cron.sh"
+      "sudo BACKUP_BUCKET='${aws_s3_bucket.public_backups.bucket}' MONGO_APP_PASSWORD='${random_password.mongo_app.result}' /tmp/mongo_backup_cron.sh",
     ]
   }
 }

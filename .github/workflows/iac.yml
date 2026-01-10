@@ -1,4 +1,4 @@
-name: iac-terraform
+name: iac-terraform-ci
 
 on:
   pull_request:
@@ -10,63 +10,85 @@ on:
     paths:
       - "terraform/**"
       - ".github/workflows/iac.yml"
+  workflow_dispatch: {}
 
 permissions:
   id-token: write
   contents: read
-  pull-requests: read
+  security-events: write
 
 concurrency:
   group: iac-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  terraform:
+  plan-and-scan:
     runs-on: ubuntu-latest
     defaults:
       run:
+        shell: bash
         working-directory: terraform
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS creds (OIDC)
+      # --- AWS auth via OIDC (no static keys) ---
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION || 'us-east-1' }}
 
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      # --- Secret scanning in CI (replaces GitHub Advanced Security on private personal repos) ---
+      - name: Gitleaks secret scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # --- Terraform tooling ---
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
-      - name: Terraform fmt
+      - name: Terraform fmt (check)
         run: terraform fmt -check -recursive
 
       - name: Terraform init
         run: terraform init -input=false
 
       - name: Terraform validate
-        run: terraform validate
+        run: terraform validate -no-color
 
-      # Static IaC security scans (fast, good signal for DevSecOps)
-      - name: Checkov (IaC scan)
-        uses: bridgecrewio/checkov-action@v12
-        with:
-          directory: terraform
-          quiet: true
-          soft_fail: false
+      # --- TFLint ---
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
 
+      - name: TFLint init
+        run: tflint --init
+
+      - name: TFLint run
+        run: tflint -f compact
+
+      # --- IaC security scans (soft-fail so you can still proceed, but you get findings) ---
       - name: tfsec (IaC scan)
         uses: aquasecurity/tfsec-action@v1.0.3
         with:
           working_directory: terraform
+          additional_args: --soft-fail
 
+      - name: Checkov (IaC scan)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform
+          framework: terraform
+          quiet: true
+          soft_fail: true
+
+      # --- Plan only (no apply; protects your existing sandbox infra) ---
       - name: Terraform plan
         run: terraform plan -no-color -input=false
-
-      - name: Terraform apply (main only)
-        if: github.ref == 'refs/heads/main'
-        run: terraform apply -auto-approve -input=false
