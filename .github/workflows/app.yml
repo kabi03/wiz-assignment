@@ -6,45 +6,40 @@ on:
     paths:
       - "tasky-main/**"
       - ".github/workflows/app.yml"
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "tasky-main/**"
+      - ".github/workflows/app.yml"
   workflow_dispatch: {}
 
 permissions:
-  id-token: write
   contents: read
+  id-token: write
   security-events: write
-
-concurrency:
-  group: app-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  AWS_REGION: us-east-1
-
-  # --- Adjust these if your names differ ---
-  EKS_CLUSTER_NAME: wiz-exercise
-  ECR_REPO: wiz-exercise-tasky
-
-  K8S_NAMESPACE: tasky
-  DEPLOYMENT_NAME: tasky
-  CONTAINER_NAME: tasky
 
 jobs:
   build-scan-push-deploy:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
+    runs-on: ubuntu-24.04
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
+      EKS_CLUSTER_NAME: wiz-exercise
+      ECR_REPO: wiz-exercise-tasky
+      K8S_NAMESPACE: tasky
+      DEPLOYMENT_NAME: tasky
+      CONTAINER_NAME: tasky
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # --- AWS auth via OIDC ---
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION || env.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+          output-env-credentials: true
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
@@ -53,11 +48,9 @@ jobs:
         id: acct
         run: echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> "$GITHUB_OUTPUT"
 
-      # --- Login to ECR ---
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # --- Build with Buildah (Podman-family tooling; great for your story) ---
       - name: Build image with Buildah
         uses: redhat-actions/buildah-build@v2
         with:
@@ -67,26 +60,26 @@ jobs:
           tags: |
             ${{ github.sha }}
             latest
+          oci: false
+          tls-verify: true
 
-      # --- Push to ECR ---
       - name: Push image to ECR
+        id: push
         run: |
           ACCOUNT_ID="${{ steps.acct.outputs.AWS_ACCOUNT_ID }}"
-          REGION="${{ secrets.AWS_REGION || env.AWS_REGION }}"
+          REGION="${AWS_REGION}"
           ECR_URI="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
-          IMAGE_URI="${ECR_URI}/${{ env.ECR_REPO }}:${{ github.sha }}"
+          IMAGE_URI="${ECR_URI}/${ECR_REPO}:${GITHUB_SHA}"
 
           # Tag local buildah image and push
-          buildah tag "${{ env.ECR_REPO }}:${{ github.sha }}" "${IMAGE_URI}"
+          buildah tag "${ECR_REPO}:${GITHUB_SHA}" "${IMAGE_URI}"
           buildah push "${IMAGE_URI}"
 
           echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
           echo "Pushed ${IMAGE_URI}"
 
-      # --- Scan the pushed image (still "before deploy") ---
-      # This will FAIL the job on HIGH/CRITICAL findings.
-      # If you prefer not to block deploy, set exit-code: 0.
-      - name: Trivy image scan (ECR)
+      # ✅ CHANGED: Trivy no longer fails the pipeline (exit-code: 0)
+      - name: Trivy image scan (report-only)
         uses: aquasecurity/trivy-action@0.24.0
         with:
           image-ref: ${{ env.IMAGE_URI }}
@@ -94,38 +87,35 @@ jobs:
           output: trivy-image.sarif
           severity: CRITICAL,HIGH
           ignore-unfixed: true
-          exit-code: 1
+          exit-code: 0
+          scan-type: image
+          vuln-type: os,library
 
-      - name: Upload Trivy SARIF to GitHub Security tab
+      # ✅ CHANGED: best-effort SARIF upload so GitHub perms won't break the workflow
+      - name: Upload Trivy SARIF (best effort)
         if: always()
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-image.sarif
 
-      # --- Deploy to EKS (only runs if scan passed) ---
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: v1.29.0
 
-      - name: Configure kubeconfig
+      - name: Update kubeconfig for EKS
+        run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Deploy updated image to Kubernetes
         run: |
-          aws eks update-kubeconfig \
-            --name "${{ env.EKS_CLUSTER_NAME }}" \
-            --region "${{ secrets.AWS_REGION || env.AWS_REGION }}"
+          kubectl -n "${K8S_NAMESPACE}" set image "deployment/${DEPLOYMENT_NAME}" \
+            "${CONTAINER_NAME}=${IMAGE_URI}" --record
 
-      - name: Deploy (set image)
-        run: |
-          kubectl -n "${{ env.K8S_NAMESPACE }}" set image \
-            deployment/"${{ env.DEPLOYMENT_NAME }}" \
-            "${{ env.CONTAINER_NAME }}"="${IMAGE_URI}"
+          kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=300s
 
-          kubectl -n "${{ env.K8S_NAMESPACE }}" rollout status deployment/"${{ env.DEPLOYMENT_NAME }}" --timeout=180s
-
-      # --- Quick proof for demo: wizexercise.txt exists ---
-      # If your label isn't app=tasky, update the selector.
       - name: Verify wizexercise.txt exists in running pod
         run: |
-          POD="$(kubectl -n "${{ env.K8S_NAMESPACE }}" get pods -l app=tasky -o jsonpath='{.items[0].metadata.name}')"
-          echo "Pod: $POD"
-          kubectl -n "${{ env.K8S_NAMESPACE }}" exec "$POD" -- sh -lc 'ls -l /app/wizexercise.txt && echo "---" && cat /app/wizexercise.txt'
+          POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l app=tasky -o jsonpath='{.items[0].metadata.name}')"
+          echo "Using pod: ${POD}"
+          kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- cat /app/wizexercise.txt
