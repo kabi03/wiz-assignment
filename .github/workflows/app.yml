@@ -31,9 +31,6 @@ jobs:
       CONTAINER_NAME: tasky
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
       - name: Fail fast if required secrets are missing
         run: |
           if [ -z "${{ secrets.AWS_REGION }}" ]; then
@@ -45,6 +42,9 @@ jobs:
             exit 1
           fi
           echo "Secrets look present (values are masked)."
+
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -61,30 +61,37 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y podman
 
-      - name: Login to Amazon ECR (Podman)
-        run: |
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-          aws ecr get-login-password --region "${AWS_REGION}" \
-            | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
-
-      - name: Set image URI
+      - name: Set image URIs
         id: img
         run: |
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          IMAGE_URI="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${GITHUB_SHA}"
+          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${GITHUB_SHA}"
+          IMAGE_URI_LATEST="${ECR_REGISTRY}/${ECR_REPO}:latest"
+
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> "$GITHUB_ENV"
           echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
+          echo "IMAGE_URI_LATEST=${IMAGE_URI_LATEST}" >> "$GITHUB_ENV"
+
           echo "image=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
+          echo "latest=${IMAGE_URI_LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Build image (Podman)
         working-directory: tasky-main
         run: |
           podman build -t "${IMAGE_URI}" -f Dockerfile .
 
-      - name: Trivy image scan (report-only)
+      - name: Save image tar for Trivy
+        run: |
+          mkdir -p /tmp/images
+          podman save -o /tmp/images/tasky-image.tar "${IMAGE_URI}"
+          ls -lh /tmp/images/tasky-image.tar
+
+      - name: Trivy scan image tar (report-only)
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: ${{ steps.img.outputs.image }}
+          input: /tmp/images/tasky-image.tar
           format: sarif
           output: trivy.sarif
           vuln-type: os,library
@@ -98,10 +105,18 @@ jobs:
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy.sarif
+        continue-on-error: true
+
+      - name: Login to Amazon ECR (Podman)
+        run: |
+          aws ecr get-login-password --region "${AWS_REGION}" \
+            | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
 
       - name: Push image (Podman)
         run: |
           podman push "${IMAGE_URI}"
+          podman tag "${IMAGE_URI}" "${IMAGE_URI_LATEST}"
+          podman push "${IMAGE_URI_LATEST}"
 
       - name: Install kubectl
         uses: azure/setup-kubectl@v4
@@ -118,15 +133,13 @@ jobs:
 
           kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=300s
 
-      - name: Verify wizexercise.txt exists (robust)
+      - name: Verify wizexercise.txt exists
         run: |
-          echo "Listing pods + labels for debugging:"
+          echo "Pods (with labels) in namespace ${K8S_NAMESPACE}:"
           kubectl -n "${K8S_NAMESPACE}" get pods --show-labels || true
 
-          # Try your expected label selector first
           POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l app=tasky -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 
-          # Fallback: use the deployment's selector labels if app=tasky isn't present
           if [ -z "$POD" ]; then
             echo "No pod found with label app=tasky. Falling back to deployment selector..."
             SELECTOR="$(kubectl -n "${K8S_NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{printf "%s=%s," $k $v}{end}' | sed 's/,$//')"
@@ -135,11 +148,15 @@ jobs:
           fi
 
           if [ -z "$POD" ]; then
-            echo "ERROR: Could not determine a pod to exec into."
+            echo "ERROR: Could not find any pod for deployment ${DEPLOYMENT_NAME} in namespace ${K8S_NAMESPACE}"
             exit 1
           fi
 
-          echo "Using pod: $POD"
+          echo "Using pod: ${POD}"
           kubectl -n "${K8S_NAMESPACE}" wait --for=condition=Ready "pod/${POD}" --timeout=120s
+
+          echo "Contents of /app:"
           kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- ls -la /app
+
+          echo "wizexercise.txt:"
           kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- cat /app/wizexercise.txt
