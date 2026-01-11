@@ -26,24 +26,37 @@ jobs:
       security-events: write
       actions: read
 
+    # Defaults first, then secrets override if present
     env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
-      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+      AWS_REGION: ${{ secrets.AWS_REGION != '' && secrets.AWS_REGION || 'us-east-1' }}
+      EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME != '' && secrets.EKS_CLUSTER_NAME || 'wiz-exercise' }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY != '' && secrets.ECR_REPOSITORY || 'wiz-exercise-tasky' }}
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Sanity check required config
+        run: |
+          echo "AWS_REGION=${AWS_REGION}"
+          echo "EKS_CLUSTER_NAME=${EKS_CLUSTER_NAME}"
+          echo "ECR_REPOSITORY=${ECR_REPOSITORY}"
+          echo "IMAGE_TAG=${IMAGE_TAG}"
+
+          if [ -z "${AWS_REGION}" ] || [ -z "${EKS_CLUSTER_NAME}" ] || [ -z "${ECR_REPOSITORY}" ]; then
+            echo "ERROR: One or more required env vars are empty (AWS_REGION/EKS_CLUSTER_NAME/ECR_REPOSITORY)."
+            echo "Set them as repo secrets OR rely on the defaults in this workflow."
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build image
@@ -78,7 +91,7 @@ jobs:
           echo "ECR_REGISTRY=${ECR_REGISTRY}" >> $GITHUB_ENV
           echo "FULL_IMAGE=${FULL_IMAGE}" >> $GITHUB_ENV
 
-          echo "Tagging local image -> ${FULL_IMAGE}"
+          echo "Tagging -> ${FULL_IMAGE}"
           docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${FULL_IMAGE}"
 
       - name: Push image to ECR
@@ -89,32 +102,23 @@ jobs:
       - name: Create kubeconfig for EKS
         run: |
           aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-          kubectl version --client=true
           kubectl get ns | head -n 20
 
-      # ✅ FIXED DEPLOY STEP: uses FULL_IMAGE (no leading slash, includes registry)
       - name: Deploy to EKS
         run: |
           echo "Deploying image: ${FULL_IMAGE}"
           kubectl -n tasky set image deployment/tasky tasky="${FULL_IMAGE}"
 
-          # Wait for rollout; if it fails/timeouts, dump useful debugging info
           kubectl -n tasky rollout status deployment/tasky --timeout=300s || {
             echo "Rollout timed out or failed. Diagnostics:"
-            echo "--- Pods"
             kubectl -n tasky get pods -o wide || true
-            echo "--- ReplicaSets"
             kubectl -n tasky get rs || true
-            echo "--- Deployment describe"
             kubectl -n tasky describe deploy tasky | sed -n '1,220p' || true
-            echo "--- Events (last 50)"
             kubectl -n tasky get events --sort-by=.metadata.creationTimestamp | tail -n 50 || true
             exit 1
           }
 
       - name: Show service/ingress
         run: |
-          echo "--- Service"
           kubectl -n tasky get svc -o wide || true
-          echo "--- Ingress"
           kubectl -n tasky get ingress -o wide || true
