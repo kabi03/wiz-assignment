@@ -1,6 +1,12 @@
 name: app-build-scan-push-deploy
 
 on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "tasky-main/**"
+      - ".github/workflows/app.yml"
+
   push:
     branches: ["main"]
     paths:
@@ -10,109 +16,105 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-scan-push:
-    name: Build, Scan, Push App Image
+  build_scan_push_deploy:
+    name: Build, Scan, Push, Deploy (Tasky)
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
       id-token: write
+      security-events: write
       actions: read
 
     env:
-      AWS_REGION: us-east-1
-      ECR_REPOSITORY: wiz-exercise-tasky
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      EKS_CLUSTER_NAME: ${{ secrets.EKS_CLUSTER_NAME }}
+      ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        id: login-ecr
+        id: ecr_login
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Docker image (GitHub runner)
+      - name: Build image
         working-directory: tasky-main
         run: |
-          docker build \
-            -t ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG} \
-            .
+          echo "Building image..."
+          docker build -t "${ECR_REPOSITORY}:${IMAGE_TAG}" .
 
-      # 🔐 Image vulnerability scan (non-blocking)
-      - name: Trivy image scan (SARIF)
+      # Optional: Scan built image (non-blocking)
+      - name: Trivy image scan
         uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
         with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          image-ref: ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          severity: CRITICAL,HIGH
           format: sarif
           output: trivy-image.sarif
-          severity: CRITICAL,HIGH
 
-      - name: Trivy image scan (table to logs)
-        uses: aquasecurity/trivy-action@0.24.0
+      - name: Upload Trivy image scan results
+        uses: github/codeql-action/upload-sarif@v3
         continue-on-error: true
         with:
-          image-ref: ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
-          format: table
-          severity: CRITICAL,HIGH
+          sarif_file: trivy-image.sarif
 
-      # ✅ Upload SARIF as artifact (NO GitHub code scanning dependency)
-      - name: Upload Trivy SARIF artifact
-        uses: actions/upload-artifact@v4
-        continue-on-error: true
-        with:
-          name: trivy-app-sarif
-          path: trivy-image.sarif
-          if-no-files-found: warn
-          retention-days: 7
+      - name: Tag image for ECR
+        run: |
+          AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          FULL_IMAGE="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+
+          echo "AWS_ACCOUNT_ID=${AWS_ACCOUNT_ID}" >> $GITHUB_ENV
+          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> $GITHUB_ENV
+          echo "FULL_IMAGE=${FULL_IMAGE}" >> $GITHUB_ENV
+
+          echo "Tagging local image -> ${FULL_IMAGE}"
+          docker tag "${ECR_REPOSITORY}:${IMAGE_TAG}" "${FULL_IMAGE}"
 
       - name: Push image to ECR
         run: |
-          docker push \
-            ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          echo "Pushing ${FULL_IMAGE}"
+          docker push "${FULL_IMAGE}"
 
-  deploy:
-    name: Deploy to EKS
-    runs-on: ubuntu-latest
-    needs: build-scan-push
-
-    permissions:
-      contents: read
-      id-token: write
-
-    env:
-      AWS_REGION: us-east-1
-      EKS_CLUSTER_NAME: wiz-exercise
-      ECR_REPOSITORY: wiz-exercise-tasky
-      IMAGE_TAG: ${{ github.sha }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      - name: Update kubeconfig
+      - name: Create kubeconfig for EKS
         run: |
-          mkdir -p ~/.kube
-          aws eks update-kubeconfig \
-            --name "${EKS_CLUSTER_NAME}" \
-            --region "${AWS_REGION}"
+          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+          kubectl version --client=true
+          kubectl get ns | head -n 20
 
-      - name: Update image and rollout
+      # ✅ FIXED DEPLOY STEP: uses FULL_IMAGE (no leading slash, includes registry)
+      - name: Deploy to EKS
         run: |
-          kubectl -n tasky set image deployment/tasky \
-            tasky=${{ secrets.ECR_REGISTRY }}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          echo "Deploying image: ${FULL_IMAGE}"
+          kubectl -n tasky set image deployment/tasky tasky="${FULL_IMAGE}"
 
-          kubectl -n tasky rollout status deployment/tasky
+          # Wait for rollout; if it fails/timeouts, dump useful debugging info
+          kubectl -n tasky rollout status deployment/tasky --timeout=300s || {
+            echo "Rollout timed out or failed. Diagnostics:"
+            echo "--- Pods"
+            kubectl -n tasky get pods -o wide || true
+            echo "--- ReplicaSets"
+            kubectl -n tasky get rs || true
+            echo "--- Deployment describe"
+            kubectl -n tasky describe deploy tasky | sed -n '1,220p' || true
+            echo "--- Events (last 50)"
+            kubectl -n tasky get events --sort-by=.metadata.creationTimestamp | tail -n 50 || true
+            exit 1
+          }
+
+      - name: Show service/ingress
+        run: |
+          echo "--- Service"
+          kubectl -n tasky get svc -o wide || true
+          echo "--- Ingress"
+          kubectl -n tasky get ingress -o wide || true
