@@ -31,15 +31,24 @@ jobs:
       pull-requests: write
       security-events: write
 
+    defaults:
+      run:
+        working-directory: terraform
+
     env:
       TF_IN_AUTOMATION: "true"
       AWS_REGION: ${{ secrets.AWS_REGION }}
 
+      # Required Terraform inputs for GitHub OIDC role (provided via GitHub repo Variables)
+      TF_VAR_github_org: ${{ vars.TF_GITHUB_ORG }}
+      TF_VAR_github_repo: ${{ vars.TF_GITHUB_REPO }}
+
     steps:
+      # IMPORTANT: checkout must come first because we use working-directory: terraform
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fail fast if required secrets are missing
+      - name: Fail fast if required settings are missing
         run: |
           if [ -z "${{ secrets.AWS_REGION }}" ]; then
             echo "Missing required secret: AWS_REGION"
@@ -49,7 +58,15 @@ jobs:
             echo "Missing required secret: AWS_ROLE_TO_ASSUME"
             exit 1
           fi
-          echo "Secrets look present (values are masked)."
+          if [ -z "${{ vars.TF_GITHUB_ORG }}" ]; then
+            echo "Missing required repo variable: TF_GITHUB_ORG"
+            exit 1
+          fi
+          if [ -z "${{ vars.TF_GITHUB_REPO }}" ]; then
+            echo "Missing required repo variable: TF_GITHUB_REPO"
+            exit 1
+          fi
+          echo "Required secrets/vars look present (values are masked)."
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -67,23 +84,18 @@ jobs:
           terraform_version: 1.6.6
 
       - name: Terraform fmt
-        working-directory: terraform
         run: terraform fmt -check -recursive
 
-      # SAFE DEFAULT: don't try to use your local state/backend in CI
-      - name: Terraform init (no backend)
-        working-directory: terraform
-        run: terraform init -backend=false -input=false
+      - name: Terraform init
+        run: terraform init -input=false
 
       - name: Terraform validate
-        working-directory: terraform
         run: terraform validate -no-color
 
       - name: Setup TFLint
         uses: terraform-linters/setup-tflint@v4
 
       - name: Run TFLint
-        working-directory: terraform
         run: |
           tflint --init
           tflint -f compact
@@ -102,9 +114,14 @@ jobs:
           framework: terraform
         continue-on-error: true
 
-      - name: Terraform plan (safe, backend disabled)
-        working-directory: terraform
-        run: terraform plan -input=false -no-color
+      - name: Terraform plan
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Upload plan artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: terraform/tfplan
 
   apply:
     name: Terraform Apply (manual + approval)
@@ -117,11 +134,21 @@ jobs:
       id-token: write
       contents: read
 
+    defaults:
+      run:
+        working-directory: terraform
+
+    env:
+      TF_IN_AUTOMATION: "true"
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      TF_VAR_github_org: ${{ vars.TF_GITHUB_ORG }}
+      TF_VAR_github_repo: ${{ vars.TF_GITHUB_REPO }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fail fast if required secrets are missing
+      - name: Fail fast if required settings are missing
         run: |
           if [ -z "${{ secrets.AWS_REGION }}" ]; then
             echo "Missing required secret: AWS_REGION"
@@ -129,6 +156,14 @@ jobs:
           fi
           if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
             echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+          if [ -z "${{ vars.TF_GITHUB_ORG }}" ]; then
+            echo "Missing required repo variable: TF_GITHUB_ORG"
+            exit 1
+          fi
+          if [ -z "${{ vars.TF_GITHUB_REPO }}" ]; then
+            echo "Missing required repo variable: TF_GITHUB_REPO"
             exit 1
           fi
 
@@ -144,12 +179,14 @@ jobs:
         with:
           terraform_version: 1.6.6
 
-      # IMPORTANT:
-      # Only enable apply once your Terraform state is in an S3 backend.
       - name: Terraform init
-        working-directory: terraform
         run: terraform init -input=false
 
+      - name: Download plan artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: terraform
+
       - name: Terraform apply
-        working-directory: terraform
-        run: terraform apply -input=false -auto-approve
+        run: terraform apply -input=false -auto-approve tfplan
