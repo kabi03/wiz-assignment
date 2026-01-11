@@ -48,6 +48,9 @@ jobs:
         run: terraform fmt -check -recursive
 
       - name: Terraform init (S3 backend)
+        env:
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_repo: ${{ github.event.repository.name }}
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ secrets.TFSTATE_BUCKET }}" \
@@ -98,4 +101,7 @@ jobs:
         continue-on-error: true
 
       - name: Terraform plan
+        env:
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_repo: ${{ github.event.repository.name }}
         run: terraform plan -no-color -input=false
