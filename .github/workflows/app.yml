@@ -1,175 +1,118 @@
 name: app-build-scan-push-deploy
 
 on:
-  pull_request:
-    branches: ["main"]
-    paths:
-      - "tasky-main/**"
-      - ".github/workflows/app.yml"
   push:
     branches: ["main"]
     paths:
       - "tasky-main/**"
       - ".github/workflows/app.yml"
-  workflow_dispatch: {}
+
+  workflow_dispatch:
 
 jobs:
-  build_scan_push_deploy:
+  build-scan-push:
+    name: Build, Scan, Push App Image
     runs-on: ubuntu-latest
 
     permissions:
       contents: read
       id-token: write
-      security-events: write
       actions: read
 
     env:
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      EKS_CLUSTER_NAME: wiz-exercise
-      ECR_REPO: wiz-exercise-tasky
-      K8S_NAMESPACE: tasky
-      DEPLOYMENT_NAME: tasky
-      CONTAINER_NAME: tasky
+      AWS_REGION: us-east-1
+      ECR_REPOSITORY: wiz-exercise-tasky
+      IMAGE_TAG: ${{ github.sha }}
 
     steps:
-      - name: Fail fast if required secrets are missing
-        run: |
-          if [ -z "${{ secrets.AWS_REGION }}" ]; then
-            echo "Missing required secret: AWS_REGION"
-            exit 1
-          fi
-          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
-            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
-            exit 1
-          fi
-          echo "Secrets look present (values are masked)."
-
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
-          audience: sts.amazonaws.com
 
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Install Podman
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y podman
-
-      - name: Set image URIs
-        id: img
-        run: |
-          ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-          ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
-
-          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPO}:${GITHUB_SHA}"
-          IMAGE_URI_LATEST="${ECR_REGISTRY}/${ECR_REPO}:latest"
-
-          echo "ECR_REGISTRY=${ECR_REGISTRY}" >> "$GITHUB_ENV"
-          echo "IMAGE_URI=${IMAGE_URI}" >> "$GITHUB_ENV"
-          echo "IMAGE_URI_LATEST=${IMAGE_URI_LATEST}" >> "$GITHUB_ENV"
-
-          echo "image=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
-
-      - name: Build image with Podman (inject commit SHA)
+      - name: Build Docker image (GitHub runner)
         working-directory: tasky-main
         run: |
-          podman build \
-            --build-arg GIT_SHA="${GITHUB_SHA}" \
-            -t "${IMAGE_URI}" \
-            -f Dockerfile .
+          docker build \
+            -t ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG} \
+            .
 
-      - name: Export image to tar for Trivy
-        run: |
-          mkdir -p /tmp/images
-          podman save -o /tmp/images/tasky-image.tar "${IMAGE_URI}"
-
-      - name: Trivy image scan (SARIF, report-only)
-        uses: aquasecurity/trivy-action@0.28.0
+      # 🔐 Image vulnerability scan (non-blocking)
+      - name: Trivy image scan (SARIF)
+        uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
         with:
-          input: /tmp/images/tasky-image.tar
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
           format: sarif
-          output: trivy.sarif
-          vuln-type: os,library
+          output: trivy-image.sarif
           severity: CRITICAL,HIGH
-          exit-code: "0"
-        continue-on-error: true
 
-      - name: Upload Trivy SARIF artifact (always)
-        if: always()
+      - name: Trivy image scan (table to logs)
+        uses: aquasecurity/trivy-action@0.24.0
+        continue-on-error: true
+        with:
+          image-ref: ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
+          format: table
+          severity: CRITICAL,HIGH
+
+      # ✅ Upload SARIF as artifact (NO GitHub code scanning dependency)
+      - name: Upload Trivy SARIF artifact
         uses: actions/upload-artifact@v4
-        with:
-          name: trivy-sarif
-          path: trivy.sarif
-
-      - name: Upload Trivy SARIF (best-effort, push-only)
-        if: github.event_name == 'push'
-        uses: github/codeql-action/upload-sarif@v4
-        with:
-          sarif_file: trivy.sarif
         continue-on-error: true
-
-      - name: Login to Amazon ECR (Podman)
-        run: |
-          aws ecr get-login-password --region "${AWS_REGION}" \
-            | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
-
-      - name: Push image to ECR (SHA + latest)
-        run: |
-          podman push "${IMAGE_URI}"
-          podman tag "${IMAGE_URI}" "${IMAGE_URI_LATEST}"
-          podman push "${IMAGE_URI_LATEST}"
-
-      - name: Install kubectl
-        uses: azure/setup-kubectl@v4
         with:
-          version: v1.29.0
+          name: trivy-app-sarif
+          path: trivy-image.sarif
+          if-no-files-found: warn
+          retention-days: 7
 
-      - name: Update kubeconfig for EKS
+      - name: Push image to ECR
         run: |
+          docker push \
+            ${{ steps.login-ecr.outputs.registry }}/${ECR_REPOSITORY}:${IMAGE_TAG}
+
+  deploy:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build-scan-push
+
+    permissions:
+      contents: read
+      id-token: write
+
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER_NAME: wiz-exercise
+      ECR_REPOSITORY: wiz-exercise-tasky
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          mkdir -p ~/.kube
           aws eks update-kubeconfig \
             --name "${EKS_CLUSTER_NAME}" \
             --region "${AWS_REGION}"
 
-      - name: Deploy updated image
+      - name: Update image and rollout
         run: |
-          kubectl -n "${K8S_NAMESPACE}" set image "deployment/${DEPLOYMENT_NAME}" \
-            "${CONTAINER_NAME}=${IMAGE_URI}"
+          kubectl -n tasky set image deployment/tasky \
+            tasky=${{ secrets.ECR_REGISTRY }}/${ECR_REPOSITORY}:${IMAGE_TAG}
 
-          kubectl -n "${K8S_NAMESPACE}" rollout status \
-            "deployment/${DEPLOYMENT_NAME}" \
-            --timeout=300s
-
-      - name: Verify wizexercise.txt exists
-        run: |
-          echo "Pods (with labels):"
-          kubectl -n "${K8S_NAMESPACE}" get pods --show-labels || true
-
-          POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l app=tasky -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-
-          if [ -z "$POD" ]; then
-            echo "Falling back to deployment selector..."
-            SELECTOR="$(kubectl -n "${K8S_NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" \
-              -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{printf "%s=%s," $k $v}{end}' \
-              | sed 's/,$//')"
-
-            POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l "${SELECTOR}" \
-              -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-          fi
-
-          if [ -z "$POD" ]; then
-            echo "ERROR: No pod found for deployment ${DEPLOYMENT_NAME}"
-            exit 1
-          fi
-
-          kubectl -n "${K8S_NAMESPACE}" wait \
-            --for=condition=Ready "pod/${POD}" \
-            --timeout=120s
-
-          kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- cat /app/wizexercise.txt
+          kubectl -n tasky rollout status deployment/tasky

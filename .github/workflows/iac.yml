@@ -32,7 +32,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
-      security-events: write
+      # security-events is only needed if uploading SARIF to code scanning
+      # security-events: write
       actions: read
 
     defaults:
@@ -86,8 +87,9 @@ jobs:
           echo "kubeconfig created"
           ls -l ~/.kube/config
 
-      # IaC security scan (optional, doesn't block)
-      - name: Trivy IaC scan
+      # IaC security scan (optional; doesn't block)
+      # Produces both SARIF (artifact) and a table output (logs)
+      - name: Trivy IaC scan (SARIF)
         uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
         with:
@@ -97,11 +99,24 @@ jobs:
           format: sarif
           output: trivy-iac.sarif
 
-      - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Trivy IaC scan (table to logs)
+        uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
         with:
-          sarif_file: trivy-iac.sarif
+          scan-type: config
+          scan-ref: terraform
+          severity: CRITICAL,HIGH
+          format: table
+
+      # ✅ Upload SARIF as a workflow artifact (works even if Code Scanning is disabled)
+      - name: Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: trivy-iac-sarif
+          path: terraform/trivy-iac.sarif
+          if-no-files-found: warn
+          retention-days: 7
 
       # Provide required terraform variables via TF_VAR_* (no committed tfvars files)
       # Also force enable flags to match the already-deployed environment so CI doesn't plan destroys.
