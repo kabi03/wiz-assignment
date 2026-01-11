@@ -18,8 +18,8 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write
       contents: read
+      id-token: write
       security-events: write
 
     env:
@@ -31,6 +31,9 @@ jobs:
       CONTAINER_NAME: tasky
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Fail fast if required secrets are missing
         run: |
           if [ -z "${{ secrets.AWS_REGION }}" ]; then
@@ -42,9 +45,6 @@ jobs:
             exit 1
           fi
           echo "Secrets look present (values are masked)."
-
-      - name: Checkout
-        uses: actions/checkout@v4
 
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -75,7 +75,6 @@ jobs:
           echo "IMAGE_URI_LATEST=${IMAGE_URI_LATEST}" >> "$GITHUB_ENV"
 
           echo "image=${IMAGE_URI}" >> "$GITHUB_OUTPUT"
-          echo "latest=${IMAGE_URI_LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Build image (Podman)
         working-directory: tasky-main
@@ -86,7 +85,6 @@ jobs:
         run: |
           mkdir -p /tmp/images
           podman save -o /tmp/images/tasky-image.tar "${IMAGE_URI}"
-          ls -lh /tmp/images/tasky-image.tar
 
       - name: Trivy scan image tar (report-only)
         uses: aquasecurity/trivy-action@0.28.0
@@ -98,11 +96,10 @@ jobs:
           severity: CRITICAL,HIGH
           exit-code: "0"
 
-      - name: Upload Trivy SARIF
-        if: >
-          github.event_name != 'pull_request' ||
-          github.event.pull_request.head.repo.fork == false
-        uses: github/codeql-action/upload-sarif@v3
+      # BEST-EFFORT ONLY — NEVER FAILS THE PIPELINE
+      - name: Upload Trivy SARIF (best-effort)
+        if: github.event_name == 'push'
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy.sarif
         continue-on-error: true
@@ -135,28 +132,21 @@ jobs:
 
       - name: Verify wizexercise.txt exists
         run: |
-          echo "Pods (with labels) in namespace ${K8S_NAMESPACE}:"
+          echo "Pods (with labels):"
           kubectl -n "${K8S_NAMESPACE}" get pods --show-labels || true
 
           POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l app=tasky -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
 
           if [ -z "$POD" ]; then
-            echo "No pod found with label app=tasky. Falling back to deployment selector..."
+            echo "Falling back to deployment selector..."
             SELECTOR="$(kubectl -n "${K8S_NAMESPACE}" get deploy "${DEPLOYMENT_NAME}" -o jsonpath='{range $k,$v := .spec.selector.matchLabels}{printf "%s=%s," $k $v}{end}' | sed 's/,$//')"
-            echo "Derived selector: ${SELECTOR}"
             POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l "${SELECTOR}" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
           fi
 
           if [ -z "$POD" ]; then
-            echo "ERROR: Could not find any pod for deployment ${DEPLOYMENT_NAME} in namespace ${K8S_NAMESPACE}"
+            echo "ERROR: No pod found for deployment ${DEPLOYMENT_NAME}"
             exit 1
           fi
 
-          echo "Using pod: ${POD}"
           kubectl -n "${K8S_NAMESPACE}" wait --for=condition=Ready "pod/${POD}" --timeout=120s
-
-          echo "Contents of /app:"
-          kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- ls -la /app
-
-          echo "wizexercise.txt:"
           kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- cat /app/wizexercise.txt
