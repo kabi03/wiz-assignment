@@ -46,32 +46,20 @@ jobs:
       TF_INPUT: "false"
 
     steps:
-      # ----------------------------
-      # 1. Checkout repo
-      # ----------------------------
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ----------------------------
-      # 2. Install Terraform
-      # ----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
-      # ----------------------------
-      # 3. AWS Auth (OIDC – no static keys)
-      # ----------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ----------------------------
-      # 4. Terraform formatting + init
-      # ----------------------------
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
@@ -87,11 +75,7 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      # =========================================================
-      # 🔥 THIS IS THE STEP YOU WERE CONFUSED ABOUT 🔥
-      # =========================================================
       # This creates ~/.kube/config on the GitHub runner
-      # so Terraform Kubernetes + Helm providers can work
       - name: Create kubeconfig for EKS
         run: |
           mkdir -p ~/.kube
@@ -101,9 +85,7 @@ jobs:
           echo "kubeconfig created"
           ls -l ~/.kube/config
 
-      # ----------------------------
-      # 5. IaC Security Scans (soft-fail)
-      # ----------------------------
+      # IaC security scan (optional, doesn't block)
       - name: Trivy IaC scan
         uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
@@ -120,16 +102,17 @@ jobs:
         with:
           sarif_file: trivy-iac.sarif
 
-      # ----------------------------
-      # 6. Terraform plan (DEFAULT)
-      # ----------------------------
+      # ---- FIX: provide required terraform variables ----
       - name: Terraform plan
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.tf_action == 'plan' }}
+        env:
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_repo: ${{ github.event.repository.name }}
         run: terraform plan -no-color
 
-      # ----------------------------
-      # 7. Terraform apply (MANUAL ONLY)
-      # ----------------------------
       - name: Terraform apply (manual)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tf_action == 'apply' }}
+        env:
+          TF_VAR_github_org: ${{ github.repository_owner }}
+          TF_VAR_github_repo: ${{ github.event.repository.name }}
         run: terraform apply -auto-approve
