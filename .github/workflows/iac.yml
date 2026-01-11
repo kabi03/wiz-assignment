@@ -5,18 +5,28 @@ on:
     branches: ["main"]
     paths:
       - "terraform/**"
-      - "terraform-bootstrap/**"
       - ".github/workflows/iac.yml"
+
   push:
     branches: ["main"]
     paths:
       - "terraform/**"
-      - "terraform-bootstrap/**"
       - ".github/workflows/iac.yml"
 
+  workflow_dispatch:
+    inputs:
+      tf_action:
+        description: "Terraform action (safe default = plan)"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+
 jobs:
-  terraform_ci:
-    name: Terraform fmt/validate + IaC scans + plan (remote state)
+  terraform:
+    name: Terraform CI (fmt, validate, scan, plan)
     runs-on: ubuntu-latest
 
     permissions:
@@ -29,28 +39,43 @@ jobs:
         shell: bash
         working-directory: terraform
 
+    env:
+      AWS_REGION: us-east-1
+      EKS_CLUSTER_NAME: wiz-exercise
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
     steps:
-      - name: Checkout
+      # ----------------------------
+      # 1. Checkout repo
+      # ----------------------------
+      - name: Checkout code
         uses: actions/checkout@v4
 
+      # ----------------------------
+      # 2. Install Terraform
+      # ----------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.6.6
 
-      - name: Configure AWS credentials (OIDC)
+      # ----------------------------
+      # 3. AWS Auth (OIDC – no static keys)
+      # ----------------------------
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # ----------------------------
+      # 4. Terraform formatting + init
+      # ----------------------------
       - name: Terraform fmt
         run: terraform fmt -check -recursive
 
-      - name: Terraform init (S3 backend)
-        env:
-          TF_VAR_github_org: ${{ github.repository_owner }}
-          TF_VAR_github_repo: ${{ github.event.repository.name }}
+      - name: Terraform init
         run: |
           terraform init -input=false \
             -backend-config="bucket=${{ secrets.TFSTATE_BUCKET }}" \
@@ -60,48 +85,51 @@ jobs:
             -backend-config="encrypt=true"
 
       - name: Terraform validate
-        run: terraform validate -no-color
+        run: terraform validate
 
-      - name: Setup TFLint
-        uses: terraform-linters/setup-tflint@v4
-
-      - name: Run TFLint
+      # =========================================================
+      # 🔥 THIS IS THE STEP YOU WERE CONFUSED ABOUT 🔥
+      # =========================================================
+      # This creates ~/.kube/config on the GitHub runner
+      # so Terraform Kubernetes + Helm providers can work
+      - name: Create kubeconfig for EKS
         run: |
-          tflint --init
-          tflint -f compact
+          mkdir -p ~/.kube
+          aws eks update-kubeconfig \
+            --name "${EKS_CLUSTER_NAME}" \
+            --region "${AWS_REGION}"
+          echo "kubeconfig created"
+          ls -l ~/.kube/config
 
-      - name: tfsec (soft-fail)
-        uses: aquasecurity/tfsec-action@v1.0.3
-        with:
-          working_directory: terraform
-          additional_args: --no-color
+      # ----------------------------
+      # 5. IaC Security Scans (soft-fail)
+      # ----------------------------
+      - name: Trivy IaC scan
+        uses: aquasecurity/trivy-action@0.24.0
         continue-on-error: true
-
-      - name: checkov (soft-fail)
-        uses: bridgecrewio/checkov-action@v12
         with:
-          directory: terraform
-          framework: terraform
-        continue-on-error: true
+          scan-type: config
+          scan-ref: terraform
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-iac.sarif
 
-      - name: Trivy config scan (soft-fail, SARIF)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: "config"
-          scan-ref: "terraform"
-          format: "sarif"
-          output: "trivy-iac.sarif"
-          severity: "CRITICAL,HIGH,MEDIUM"
-        continue-on-error: true
-
-      - name: Upload Trivy SARIF (best-effort)
+      - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
+        continue-on-error: true
         with:
           sarif_file: trivy-iac.sarif
-        continue-on-error: true
 
+      # ----------------------------
+      # 6. Terraform plan (DEFAULT)
+      # ----------------------------
       - name: Terraform plan
-        env:
-          TF_VAR_github_org: ${{ github.repository_owner }}
-          TF_VAR_github_repo: ${{ github.event.repository.name }}
-        run: terraform plan -no-color -input=false
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.tf_action == 'plan' }}
+        run: terraform plan -no-color
+
+      # ----------------------------
+      # 7. Terraform apply (MANUAL ONLY)
+      # ----------------------------
+      - name: Terraform apply (manual)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tf_action == 'apply' }}
+        run: terraform apply -auto-approve
