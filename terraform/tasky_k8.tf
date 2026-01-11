@@ -61,6 +61,14 @@ resource "kubernetes_deployment" "tasky" {
     labels    = { app = "tasky" }
   }
 
+  # ✅ Option A: Let CI/CD control the image tag (SHA), Terraform controls everything else.
+  # This prevents Terraform from trying to "fix" the app back to :latest.
+  lifecycle {
+    ignore_changes = [
+      spec[0].template[0].spec[0].container[0].image
+    ]
+  }
+
   spec {
     replicas = 1
 
