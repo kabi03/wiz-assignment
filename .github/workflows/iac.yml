@@ -33,6 +33,7 @@ jobs:
       contents: read
       id-token: write
       security-events: write
+      actions: read
 
     defaults:
       run:
@@ -75,7 +76,7 @@ jobs:
       - name: Terraform validate
         run: terraform validate
 
-      # This creates ~/.kube/config on the GitHub runner
+      # This creates ~/.kube/config on the GitHub runner so Kubernetes/Helm providers can work
       - name: Create kubeconfig for EKS
         run: |
           mkdir -p ~/.kube
@@ -102,17 +103,17 @@ jobs:
         with:
           sarif_file: trivy-iac.sarif
 
-      # ---- FIX: provide required terraform variables ----
+      # Provide required terraform variables + ensure CI matches deployed state (ci.tfvars)
       - name: Terraform plan
         if: ${{ github.event_name != 'workflow_dispatch' || inputs.tf_action == 'plan' }}
         env:
           TF_VAR_github_org: ${{ github.repository_owner }}
           TF_VAR_github_repo: ${{ github.event.repository.name }}
-        run: terraform plan -no-color
+        run: terraform plan -no-color -var-file=ci.tfvars
 
       - name: Terraform apply (manual)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tf_action == 'apply' }}
         env:
           TF_VAR_github_org: ${{ github.repository_owner }}
           TF_VAR_github_repo: ${{ github.event.repository.name }}
-        run: terraform apply -auto-approve
+        run: terraform apply -auto-approve -var-file=ci.tfvars
