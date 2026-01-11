@@ -59,7 +59,7 @@ jobs:
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Set image uri
+      - name: Set image URI
         id: img
         run: |
           ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
@@ -90,7 +90,7 @@ jobs:
           severity: CRITICAL,HIGH
         continue-on-error: true
 
-      - name: Upload Trivy SARIF (best effort)
+      - name: Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy.sarif
@@ -104,15 +104,14 @@ jobs:
       - name: Update kubeconfig for EKS
         run: aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
 
-      - name: Deploy updated image to Kubernetes
+      - name: Deploy updated image
         run: |
           kubectl -n "${K8S_NAMESPACE}" set image "deployment/${DEPLOYMENT_NAME}" \
             "${CONTAINER_NAME}=${IMAGE_URI}"
 
           kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=300s
 
-      - name: Verify wizexercise.txt exists in running pod
+      - name: Verify wizexercise.txt exists
         run: |
           POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l app=tasky -o jsonpath='{.items[0].metadata.name}')"
-          echo "Using pod: ${POD}"
           kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- cat /app/wizexercise.txt
