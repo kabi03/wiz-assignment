@@ -1,4 +1,3 @@
-# .github/workflows/iac.yml
 name: iac-terraform-ci
 
 on:
@@ -46,6 +45,10 @@ jobs:
       TFSTATE_KEY: ${{ secrets.TFSTATE_KEY }}
       TFLOCK_TABLE: ${{ secrets.TFLOCK_TABLE }}
 
+      # ✅ REQUIRED FIX — Terraform variables for github_oidc.tf
+      TF_VAR_github_org: ${{ secrets.GITHUB_ORG }}
+      TF_VAR_github_repo: ${{ secrets.GITHUB_REPO }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,12 +59,20 @@ jobs:
           set -euo pipefail
           for v in AWS_REGION TFSTATE_BUCKET TFSTATE_KEY TFLOCK_TABLE; do
             if [ -z "${!v:-}" ]; then
-              echo "Missing required secret/env: $v"
+              echo "Missing required env: $v"
               exit 1
             fi
           done
           if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
             echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+          if [ -z "${{ secrets.GITHUB_ORG }}" ]; then
+            echo "Missing required secret: GITHUB_ORG"
+            exit 1
+          fi
+          if [ -z "${{ secrets.GITHUB_REPO }}" ]; then
+            echo "Missing required secret: GITHUB_REPO"
             exit 1
           fi
 
@@ -92,7 +103,6 @@ jobs:
         working-directory: terraform
         run: terraform validate
 
-      # If your Terraform includes Kubernetes/Helm providers, kubeconfig helps provider init during plan.
       - name: Configure kubeconfig for EKS (for providers)
         run: |
           aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
@@ -104,14 +114,10 @@ jobs:
           sudo apt-get install -y wget
           wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
 
-      # IMPORTANT CHANGE:
-      # Output SARIF to repo root as "trivy-iac.sarif" (stable path)
       - name: Trivy IaC scan (SARIF)
         run: |
           trivy config terraform --format sarif --output trivy-iac.sarif
 
-      # IMPORTANT CHANGE:
-      # Upload from repo root and FAIL if missing (no more silent warn)
       - name: Upload Trivy SARIF artifact
         uses: actions/upload-artifact@v4
         with:
@@ -120,16 +126,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Optional: human-readable console output in logs
-      - name: Trivy IaC scan (table)
-        run: |
-          trivy config terraform --format table
-
       - name: Terraform plan
         working-directory: terraform
         run: terraform plan -no-color -input=false
 
-      # Manual apply only (protects your stable infra)
       - name: Terraform apply (manual only)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tf_action == 'apply' }}
         working-directory: terraform
