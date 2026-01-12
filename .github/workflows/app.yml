@@ -85,13 +85,20 @@ jobs:
           set -euo pipefail
           podman build -t "${{ steps.vars.outputs.image_sha }}" -t "${{ steps.vars.outputs.image_latest }}" tasky-main
 
-      - name: Trivy scan image (SARIF)
+      # ✅ IMPORTANT CHANGE: Save the built image to an archive and scan the archive
+      - name: Save image to archive (for Trivy)
         shell: bash
         run: |
           set -euo pipefail
-          trivy image --format sarif --output trivy-image.sarif "${{ steps.vars.outputs.image_sha }}"
+          podman save --format oci-archive -o image-oci.tar "${{ steps.vars.outputs.image_sha }}"
+          ls -lh image-oci.tar
 
-      # ✅ IMPORTANT CHANGE: Upload SARIF as an Actions artifact (NOT code scanning)
+      - name: Trivy scan image archive (SARIF)
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image --input image-oci.tar --format sarif --output trivy-image.sarif
+
       - name: Upload Trivy SARIF artifact
         uses: actions/upload-artifact@v4
         with:
@@ -100,12 +107,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      # Optional: also print a readable report in logs
-      - name: Trivy scan image (table)
+      - name: Trivy scan image archive (table)
         shell: bash
         run: |
           set -euo pipefail
-          trivy image --format table "${{ steps.vars.outputs.image_sha }}"
+          trivy image --input image-oci.tar --format table
 
       - name: Push image to ECR (podman)
         shell: bash
