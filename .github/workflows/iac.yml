@@ -45,34 +45,38 @@ jobs:
       TFSTATE_KEY: ${{ secrets.TFSTATE_KEY }}
       TFLOCK_TABLE: ${{ secrets.TFLOCK_TABLE }}
 
-      # ✅ REQUIRED FIX — Terraform variables for github_oidc.tf
-      TF_VAR_github_org: ${{ secrets.GITHUB_ORG }}
-      TF_VAR_github_repo: ${{ secrets.GITHUB_REPO }}
+      # ✅ GitHub OIDC Terraform variables (FROM GitHub Variables)
+      TF_VAR_github_org: ${{ vars.TF_GITHUB_ORG }}
+      TF_VAR_github_repo: ${{ vars.TF_GITHUB_REPO }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fail fast if required secrets are missing
+      - name: Fail fast if required inputs are missing
         shell: bash
         run: |
           set -euo pipefail
+
           for v in AWS_REGION TFSTATE_BUCKET TFSTATE_KEY TFLOCK_TABLE; do
             if [ -z "${!v:-}" ]; then
               echo "Missing required env: $v"
               exit 1
             fi
           done
+
           if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
             echo "Missing required secret: AWS_ROLE_TO_ASSUME"
             exit 1
           fi
-          if [ -z "${{ secrets.GITHUB_ORG }}" ]; then
-            echo "Missing required secret: GITHUB_ORG"
+
+          if [ -z "${{ vars.TF_GITHUB_ORG }}" ]; then
+            echo "Missing required variable: TF_GITHUB_ORG"
             exit 1
           fi
-          if [ -z "${{ secrets.GITHUB_REPO }}" ]; then
-            echo "Missing required secret: GITHUB_REPO"
+
+          if [ -z "${{ vars.TF_GITHUB_REPO }}" ]; then
+            echo "Missing required variable: TF_GITHUB_REPO"
             exit 1
           fi
 
