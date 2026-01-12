@@ -31,4 +31,8 @@ terraform {
 
 provider "aws" {
   region = var.region
+
+  ignore_tags {
+    keys = ["aws-apn-id"]
+  }
 }
