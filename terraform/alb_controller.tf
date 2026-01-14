@@ -254,13 +254,6 @@ resource "helm_release" "alb_controller" {
     value = aws_vpc.this.id
   }
 
-  lifecycle {
-    ignore_changes = [
-      metadata,
-      manifest,
-    ]
-  }
-
   depends_on = [
     aws_eks_node_group.default,
     aws_iam_role_policy_attachment.alb_controller
