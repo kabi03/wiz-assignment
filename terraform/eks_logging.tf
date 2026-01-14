@@ -1,9 +1,9 @@
-# terraform/eks_logging.tf
+// EKS control plane log group configuration.
 
 resource "aws_cloudwatch_log_group" "eks_control_plane" {
-  # This is the default log group name EKS uses for control plane logs
+  // Default log group name used by EKS.
   name = "/aws/eks/${var.name}/cluster"
 
-  # Keep costs low in the sandbox
+  // Short retention to keep costs low in the lab.
   retention_in_days = 7
 }

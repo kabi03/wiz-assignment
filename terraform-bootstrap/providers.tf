@@ -1,3 +1,4 @@
+// Terraform version and provider pins for bootstrap state.
 terraform {
   required_version = ">= 1.5.0"
 
@@ -9,6 +10,7 @@ terraform {
   }
 }
 
+// AWS provider for the bootstrap stack in us-east-1.
 provider "aws" {
   region = "us-east-1"
 

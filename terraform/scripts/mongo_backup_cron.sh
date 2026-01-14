@@ -1,10 +1,10 @@
 #!/bin/bash
 set -e
 
-# Expected env vars from Terraform:
-#   BACKUP_BUCKET
-#   MONGO_APP_PASSWORD
+# Install a daily Mongo backup cron job on the VM.
+# Expected env vars: BACKUP_BUCKET and MONGO_APP_PASSWORD.
 
+# Paths and defaults.
 INSTALL_DIR="/usr/local/bin"
 BACKUP_SCRIPT="${INSTALL_DIR}/wiz_mongo_backup.sh"
 ENV_FILE="/etc/wiz-mongo-backup.env"
@@ -22,21 +22,17 @@ if [ -z "${MONGO_APP_PASSWORD:-}" ]; then
   exit 1
 fi
 
-# ----------------------------
-# Write env file (NO QUOTES NEEDED because we won't 'source' it)
-# ----------------------------
+# Write the env file used by the backup job.
 sudo bash -lc "cat > ${ENV_FILE} <<'EOF'
 BACKUP_BUCKET=${BACKUP_BUCKET}
 MONGO_APP_PASSWORD=${MONGO_APP_PASSWORD}
 EOF"
 
-# readable by ubuntu, not world-readable
+# Keep the env file readable by ubuntu but not world-readable.
 sudo chown root:ubuntu "${ENV_FILE}"
 sudo chmod 640 "${ENV_FILE}"
 
-# ----------------------------
-# Write backup script (DO NOT SOURCE env file; parse it safely)
-# ----------------------------
+# Write the backup script that parses the env file.
 sudo bash -lc "cat > ${BACKUP_SCRIPT} <<'EOF'
 #!/bin/bash
 set -e
@@ -65,18 +61,14 @@ EOF"
 
 sudo chmod 755 "${BACKUP_SCRIPT}"
 
-# ----------------------------
-# Ensure log directory exists and is writable by ubuntu
-# ----------------------------
+# Ensure the log directory exists and is writable.
 sudo mkdir -p "${LOG_DIR}"
 sudo chown ubuntu:ubuntu "${LOG_DIR}"
 sudo touch "${LOG_FILE}"
 sudo chown ubuntu:ubuntu "${LOG_FILE}"
 sudo chmod 664 "${LOG_FILE}"
 
-# ----------------------------
-# Install DAILY cron @ 03:00 UTC
-# ----------------------------
+# Install the daily cron entry for the ubuntu user.
 CRON_LINE="0 3 * * * ${BACKUP_SCRIPT} >> ${LOG_FILE} 2>&1 # wiz-mongodump-backup"
 
 EXISTING_CRON="$(sudo crontab -u ${CRON_USER} -l 2>/dev/null | grep -v wiz-mongodump-backup || true)"

@@ -1,5 +1,6 @@
 name: app-build-scan-push-deploy
 
+# Build, scan, push, and deploy the app image.
 on:
   pull_request:
     branches: ["main"]
@@ -15,6 +16,7 @@ on:
 
 jobs:
   build_scan_push_deploy:
+    # CI job for the Tasky image and deployment.
     runs-on: ubuntu-latest
 
     permissions:
@@ -24,6 +26,7 @@ jobs:
       actions: read
 
     env:
+      # Runtime inputs for build and deploy steps.
       AWS_REGION: ${{ secrets.AWS_REGION }}
       EKS_CLUSTER_NAME: wiz-exercise
       ECR_REPO: wiz-exercise-tasky
@@ -35,6 +38,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Validate required secrets.
       - name: Fail fast if required secrets are missing
         shell: bash
         run: |
@@ -54,6 +58,7 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Install podman and Trivy on the runner.
       - name: Install dependencies (podman + trivy)
         shell: bash
         run: |
@@ -85,7 +90,6 @@ jobs:
           set -euo pipefail
           podman build -t "${{ steps.vars.outputs.image_sha }}" -t "${{ steps.vars.outputs.image_latest }}" tasky-main
 
-      # ✅ IMPORTANT CHANGE: Save as docker-archive (Trivy-compatible)
       - name: Save image to archive (for Trivy)
         shell: bash
         run: |
@@ -93,6 +97,7 @@ jobs:
           podman save --format docker-archive -o image.tar "${{ steps.vars.outputs.image_sha }}"
           ls -lh image.tar
 
+      # Scan the image archive and publish SARIF.
       - name: Trivy scan image archive (SARIF)
         shell: bash
         run: |
@@ -107,12 +112,14 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Show scan output in logs.
       - name: Trivy scan image archive (table)
         shell: bash
         run: |
           set -euo pipefail
           trivy image --input image.tar --format table
 
+      # Push both SHA and latest tags.
       - name: Push image to ECR (podman)
         shell: bash
         run: |
@@ -120,6 +127,7 @@ jobs:
           podman push "${{ steps.vars.outputs.image_sha }}"
           podman push "${{ steps.vars.outputs.image_latest }}"
 
+      # Configure kubectl for the target cluster.
       - name: Configure kubeconfig for EKS
         shell: bash
         run: |
@@ -127,6 +135,7 @@ jobs:
           aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
           kubectl version --client=true
 
+      # Update the deployment to the new image.
       - name: Deploy updated image to Kubernetes
         shell: bash
         run: |
@@ -134,6 +143,7 @@ jobs:
           kubectl -n "${K8S_NAMESPACE}" set image "deployment/${DEPLOYMENT_NAME}" "${CONTAINER_NAME}=${{ steps.vars.outputs.image_sha }}"
           kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=180s
 
+      # Verify the file generated during the image build.
       - name: Verify wizexercise.txt in running pod
         shell: bash
         run: |

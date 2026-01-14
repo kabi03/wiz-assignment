@@ -1,19 +1,15 @@
-############################################
-# OIDC provider for EKS (needed for IRSA)
-############################################
+// EKS OIDC provider used by IRSA.
 
 resource "aws_iam_openid_connect_provider" "eks" {
   client_id_list = ["sts.amazonaws.com"]
 
-  # Common AWS root CA thumbprint used widely for IRSA in labs.
+  // Thumbprint used to validate the OIDC issuer.
   thumbprint_list = ["9e99a48a9960b14926bb7f3b02e22da0ecd46a1b"]
 
   url = aws_eks_cluster.this.identity[0].oidc[0].issuer
 }
 
-############################################
-# IAM role for AWS Load Balancer Controller (IRSA)
-############################################
+// IAM role that the ALB controller service account assumes.
 
 data "aws_iam_policy_document" "alb_assume_role" {
   statement {
@@ -38,13 +34,7 @@ resource "aws_iam_role" "alb_controller" {
   assume_role_policy = data.aws_iam_policy_document.alb_assume_role.json
 }
 
-############################################
-# IAM policy for AWS Load Balancer Controller
-# Fixes:
-# - elasticloadbalancing:AddTags
-# - ec2:GetSecurityGroupsForVpc
-# - waf-regional:GetWebACLForResource
-############################################
+// IAM policy that grants the controller ELB and networking permissions.
 
 resource "aws_iam_policy" "alb_controller" {
   name        = "AWSLoadBalancerControllerIAMPolicy"
@@ -54,7 +44,7 @@ resource "aws_iam_policy" "alb_controller" {
     Version = "2012-10-17"
     Statement = [
 
-      # Service-linked role creation for ELB (required in some accounts)
+      // Allow ELB service-linked role creation when required.
       {
         Effect   = "Allow"
         Action   = ["iam:CreateServiceLinkedRole"]
@@ -66,7 +56,7 @@ resource "aws_iam_policy" "alb_controller" {
         }
       },
 
-      # EC2 + networking discovery (controller needs these)
+      // EC2 and networking discovery APIs used by the controller.
       {
         Effect = "Allow"
         Action = [
@@ -85,13 +75,13 @@ resource "aws_iam_policy" "alb_controller" {
           "ec2:GetCoipPoolUsage",
           "ec2:DescribeCoipPools",
 
-          # ✅ Missing in your role today (you saw AccessDenied)
+          // Required when resolving security groups in the VPC.
           "ec2:GetSecurityGroupsForVpc"
         ]
         Resource = "*"
       },
 
-      # Security group management
+      // Security group lifecycle operations for ALB resources.
       {
         Effect = "Allow"
         Action = [
@@ -107,7 +97,7 @@ resource "aws_iam_policy" "alb_controller" {
         Resource = "*"
       },
 
-      # ELBv2 lifecycle operations
+      // ALB and target group lifecycle operations.
       {
         Effect = "Allow"
         Action = [
@@ -142,8 +132,7 @@ resource "aws_iam_policy" "alb_controller" {
         Resource = "*"
       },
 
-      # ✅ REQUIRED FIX: allow tagging (your error is AddTags denied)
-      # Do NOT restrict with tag conditions in this lab; keep it simple.
+      // Tagging permissions for ELB resources.
       {
         Effect = "Allow"
         Action = [
@@ -158,7 +147,7 @@ resource "aws_iam_policy" "alb_controller" {
         ]
       },
 
-      # Read-only ELB describes
+      // Read-only describe calls.
       {
         Effect = "Allow"
         Action = [
@@ -176,7 +165,7 @@ resource "aws_iam_policy" "alb_controller" {
         Resource = "*"
       },
 
-      # WAFv2 (modern) - optional but common
+      // WAFv2 integration support.
       {
         Effect = "Allow"
         Action = [
@@ -188,7 +177,7 @@ resource "aws_iam_policy" "alb_controller" {
         Resource = "*"
       },
 
-      # ✅ WAF Regional (legacy) - your controller is calling this (AccessDenied)
+      // WAF Regional support for older environments.
       {
         Effect = "Allow"
         Action = [
@@ -200,7 +189,7 @@ resource "aws_iam_policy" "alb_controller" {
         Resource = "*"
       },
 
-      # Shield - optional
+      // Shield integration support.
       {
         Effect = "Allow"
         Action = [
@@ -215,15 +204,15 @@ resource "aws_iam_policy" "alb_controller" {
   })
 }
 
+// Attach the controller policy to its role.
 resource "aws_iam_role_policy_attachment" "alb_controller" {
   role       = aws_iam_role.alb_controller.name
   policy_arn = aws_iam_policy.alb_controller.arn
 }
 
-############################################
-# Install AWS Load Balancer Controller via Helm
-############################################
+// Install the ALB controller via Helm.
 
+// Deploy the controller chart into kube-system.
 resource "helm_release" "alb_controller" {
   name       = "aws-load-balancer-controller"
   namespace  = "kube-system"
@@ -231,11 +220,13 @@ resource "helm_release" "alb_controller" {
   chart      = "aws-load-balancer-controller"
   version    = "1.7.2"
 
+  // Pass cluster identity to the controller.
   set {
     name  = "clusterName"
     value = aws_eks_cluster.this.name
   }
 
+  // Create and annotate a dedicated service account.
   set {
     name  = "serviceAccount.create"
     value = "true"
@@ -251,11 +242,13 @@ resource "helm_release" "alb_controller" {
     value = aws_iam_role.alb_controller.arn
   }
 
+  // Provide region and VPC for discovery.
   set {
     name  = "region"
     value = var.region
   }
 
+  // Tell the controller which VPC to use.
   set {
     name  = "vpcId"
     value = aws_vpc.this.id

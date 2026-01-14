@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euxo pipefail
 
+# Log user-data output for troubleshooting.
 exec > >(tee -a /var/log/user-data.log) 2>&1
 echo "[user-data] start $(date -Is)"
 
@@ -10,18 +11,20 @@ ADMIN_PW='${mongo_admin_password}'
 APP_PW='${mongo_app_password}'
 BACKUP_BUCKET='${public_backup_bucket}'
 
+# Install base packages required for Mongo and backups.
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg lsb-release awscli cron
 
-# Install MongoDB 4.4 repo (no patch pinning)
+# Install MongoDB 4.4 repo.
 curl -fsSL https://pgp.mongodb.com/server-4.4.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-4.4.gpg
 echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-4.4.gpg ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" \
   > /etc/apt/sources.list.d/mongodb-org-4.4.list
 
+# Install MongoDB from the added repo.
 apt-get update -y
 apt-get install -y mongodb-org
 
-# Deterministic mongod.conf
+# Write mongod.conf with auth enabled and listen on all interfaces.
 cat >/etc/mongod.conf <<'EOF'
 storage:
   dbPath: /var/lib/mongodb
@@ -44,10 +47,12 @@ security:
   authorization: enabled
 EOF
 
+# Enable and start MongoDB.
 systemctl daemon-reload
 systemctl enable mongod
 systemctl restart mongod
 
+# Wait for MongoDB to listen on the port.
 echo "[user-data] waiting for mongod to listen on 27017..."
 for i in $(seq 1 60); do
   if ss -lntp | grep -q ':27017'; then
@@ -64,6 +69,7 @@ if ! ss -lntp | grep -q ':27017'; then
   exit 1
 fi
 
+# Wait for MongoDB to respond to a ping.
 echo "[user-data] waiting for mongod ping..."
 for i in $(seq 1 60); do
   if mongo --quiet --eval 'db.runCommand({ping:1}).ok' admin 2>/dev/null | grep -q '^1$'; then
@@ -73,7 +79,7 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
-# --- Create admin user using localhost exception WITHOUT usersInfo/getUser ---
+# Create the admin user via the localhost exception.
 cat >/tmp/bootstrap-admin.js <<'JS'
 try {
   db.getSiblingDB("admin").createUser({
@@ -84,7 +90,7 @@ try {
   });
   print("[bootstrap] created admin user");
 } catch (e) {
-  // If it already exists, that's fine for idempotency
+  // User exists, continue.
   if (String(e).includes("already exists")) {
     print("[bootstrap] admin user already exists");
   } else {
@@ -96,7 +102,7 @@ JS
 
 mongo --quiet admin --eval "var ADMIN_PW='${mongo_admin_password}';" /tmp/bootstrap-admin.js
 
-# --- Now authenticate as admin and create/update tasky user ---
+# Create or update the tasky app user.
 cat >/tmp/bootstrap-tasky.js <<'JS'
 const admin = db.getSiblingDB("admin");
 
@@ -130,13 +136,13 @@ JS
 
 mongo --quiet admin --eval "var ADMIN_PW='${mongo_admin_password}'; var APP_PW='${mongo_app_password}';" /tmp/bootstrap-tasky.js
 
-# Validate tasky auth locally
+# Validate the tasky login locally.
 echo "[user-data] validating tasky auth locally..."
 mongo --quiet "mongodb://tasky:${mongo_app_password}@127.0.0.1:27017/go-mongodb?authSource=admin" \
   --eval 'db.runCommand({ping:1}).ok' | grep -q '^1$'
 echo "[user-data] tasky auth validated"
 
-# Optional: backup script (intentional weakness)
+# Install local backup script for the lab.
 cat > /usr/local/bin/mongo_backup.sh <<SCRIPT
 #!/bin/bash
 set -euo pipefail

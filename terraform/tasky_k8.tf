@@ -9,12 +9,14 @@ variable "tasky_image_tag" {
   default     = "latest"
 }
 
+// Namespace for the Tasky app resources.
 resource "kubernetes_namespace" "tasky" {
   metadata {
     name = var.tasky_namespace
   }
 }
 
+// Service account used by the Tasky deployment.
 resource "kubernetes_service_account" "tasky" {
   metadata {
     name      = "tasky-sa"
@@ -22,7 +24,7 @@ resource "kubernetes_service_account" "tasky" {
   }
 }
 
-# INTENTIONAL WEAKNESS (mirrors your YAML) — but now uniquely named to avoid collisions.
+// Grant cluster-admin to the app service account for the lab.
 resource "kubernetes_cluster_role_binding" "tasky_cluster_admin" {
   metadata {
     name = "${var.name}-tasky-cluster-admin"
@@ -41,6 +43,7 @@ resource "kubernetes_cluster_role_binding" "tasky_cluster_admin" {
   }
 }
 
+// Secret holding app environment variables.
 resource "kubernetes_secret" "tasky_env" {
   metadata {
     name      = "tasky-env"
@@ -49,11 +52,13 @@ resource "kubernetes_secret" "tasky_env" {
 
   type = "Opaque"
 
+  // Provide the Mongo connection string to the app.
   data = {
     MONGODB_URI = local.mongo_uri
   }
 }
 
+// Tasky application deployment.
 resource "kubernetes_deployment" "tasky" {
   metadata {
     name      = "tasky"
@@ -61,8 +66,7 @@ resource "kubernetes_deployment" "tasky" {
     labels    = { app = "tasky" }
   }
 
-  # ✅ Option A: Let CI/CD control the image tag (SHA), Terraform controls everything else.
-  # This prevents Terraform from trying to "fix" the app back to :latest.
+  // Let CI control the image tag and ignore drift in Terraform.
   lifecycle {
     ignore_changes = [
       spec[0].template[0].spec[0].container[0].image
@@ -92,13 +96,14 @@ resource "kubernetes_deployment" "tasky" {
             container_port = 8080
           }
 
+          // Inject secret values as environment variables.
           env_from {
             secret_ref {
               name = kubernetes_secret.tasky_env.metadata[0].name
             }
           }
 
-          # INTENTIONAL WEAKNESS (mirrors your YAML)
+          // Run the container as privileged for the lab.
           security_context {
             privileged = true
           }
@@ -108,6 +113,7 @@ resource "kubernetes_deployment" "tasky" {
   }
 }
 
+// ClusterIP service to expose the Tasky pods.
 resource "kubernetes_service" "tasky" {
   metadata {
     name      = "tasky-svc"
@@ -128,6 +134,7 @@ resource "kubernetes_service" "tasky" {
   }
 }
 
+// Ingress that triggers ALB provisioning.
 resource "kubernetes_ingress_v1" "tasky" {
   metadata {
     name      = "tasky-ingress"

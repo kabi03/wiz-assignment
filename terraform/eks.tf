@@ -1,3 +1,4 @@
+// IAM role assumed by the EKS control plane.
 resource "aws_iam_role" "eks_cluster" {
   name = "${var.name}-eks-cluster-role"
   assume_role_policy = jsonencode({
@@ -10,11 +11,13 @@ resource "aws_iam_role" "eks_cluster" {
   })
 }
 
+// Attach the managed EKS cluster policy.
 resource "aws_iam_role_policy_attachment" "eks_cluster_AmazonEKSClusterPolicy" {
   role       = aws_iam_role.eks_cluster.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
+// IAM role assumed by worker nodes.
 resource "aws_iam_role" "eks_node" {
   name = "${var.name}-eks-node-role"
   assume_role_policy = jsonencode({
@@ -27,33 +30,38 @@ resource "aws_iam_role" "eks_node" {
   })
 }
 
+// Allow nodes to join and communicate with EKS.
 resource "aws_iam_role_policy_attachment" "node_AmazonEKSWorkerNodePolicy" {
   role       = aws_iam_role.eks_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
 }
 
+// Allow nodes to pull images from ECR.
 resource "aws_iam_role_policy_attachment" "node_AmazonEC2ContainerRegistryReadOnly" {
   role       = aws_iam_role.eks_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
+// Allow the CNI plugin to manage ENIs and IPs.
 resource "aws_iam_role_policy_attachment" "node_AmazonEKS_CNI_Policy" {
   role       = aws_iam_role.eks_node.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
+// Security group for the EKS control plane.
 resource "aws_security_group" "eks_cluster" {
   name        = "${var.name}-eks-cluster-sg"
   description = "EKS cluster SG"
   vpc_id      = aws_vpc.this.id
 }
 
+// EKS cluster control plane.
 resource "aws_eks_cluster" "this" {
   name     = var.name
   role_arn = aws_iam_role.eks_cluster.arn
 
   vpc_config {
-    # Private subnets for EKS networking (nodes are in private subnets via the node group)
+    // Private subnets for node networking.
     subnet_ids              = aws_subnet.private[*].id
     endpoint_public_access  = true
     endpoint_private_access = false
@@ -61,12 +69,13 @@ resource "aws_eks_cluster" "this" {
     security_group_ids      = [aws_security_group.eks_cluster.id]
   }
 
+  // Use aws-auth ConfigMap for access control.
   access_config {
     authentication_mode                         = "CONFIG_MAP"
     bootstrap_cluster_creator_admin_permissions = true
   }
 
-  # Control plane logging to CloudWatch (great for the Cloud Native Security requirement)
+  // Enable control plane audit and API logs.
   enabled_cluster_log_types = [
     "api",
     "audit",
@@ -81,18 +90,21 @@ resource "aws_eks_cluster" "this" {
   ]
 }
 
+// Managed node group for running workloads.
 resource "aws_eks_node_group" "default" {
   cluster_name    = aws_eks_cluster.this.name
   node_group_name = "${var.name}-ng"
   node_role_arn   = aws_iam_role.eks_node.arn
   subnet_ids      = aws_subnet.private[*].id
 
+  // Single-node pool to keep costs low.
   scaling_config {
     desired_size = 1
     min_size     = 1
     max_size     = 1
   }
 
+  // Use small instances to reduce lab cost.
   instance_types = ["t3.small"]
 
   depends_on = [

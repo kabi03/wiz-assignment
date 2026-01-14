@@ -1,3 +1,4 @@
+// Random admin password for MongoDB.
 resource "random_password" "mongo_admin" {
   length  = 16
   special = true
@@ -7,6 +8,7 @@ resource "random_password" "mongo_admin" {
   }
 }
 
+// Random app user password for MongoDB.
 resource "random_password" "mongo_app" {
   length  = 16
   special = true
@@ -16,23 +18,25 @@ resource "random_password" "mongo_app" {
   }
 }
 
-# SSH key to access VM
+// SSH key for VM access.
 resource "tls_private_key" "ssh" {
   algorithm = "RSA"
   rsa_bits  = 4096
 }
 
+// Register the SSH public key with EC2.
 resource "aws_key_pair" "mongo" {
   key_name   = "${var.name}-mongo-key"
   public_key = tls_private_key.ssh.public_key_openssh
 }
 
-# Bucket for public backups (intentionally insecure)
+// Public S3 bucket used for lab backups.
 resource "aws_s3_bucket" "public_backups" {
   bucket_prefix = "${var.name}-public-backups-"
   force_destroy = true
 }
 
+// Disable public access blocks for the lab bucket.
 resource "aws_s3_bucket_public_access_block" "public_backups" {
   bucket                  = aws_s3_bucket.public_backups.id
   block_public_acls       = false
@@ -41,6 +45,7 @@ resource "aws_s3_bucket_public_access_block" "public_backups" {
   restrict_public_buckets = false
 }
 
+// Bucket policy that allows public list and read.
 resource "aws_s3_bucket_policy" "public_backups" {
   bucket = aws_s3_bucket.public_backups.id
   policy = jsonencode({
@@ -64,7 +69,7 @@ resource "aws_s3_bucket_policy" "public_backups" {
   })
 }
 
-# Overly-permissive instance role (intentional weakness)
+// Overly permissive instance role for the lab.
 resource "aws_iam_role" "mongo_vm" {
   name = "${var.name}-mongo-vm-role"
   assume_role_policy = jsonencode({
@@ -77,25 +82,30 @@ resource "aws_iam_role" "mongo_vm" {
   })
 }
 
+// EC2 full access for the lab instance role.
 resource "aws_iam_role_policy_attachment" "mongo_vm_ec2_full" {
   role       = aws_iam_role.mongo_vm.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2FullAccess"
 }
 
+// S3 full access for the lab instance role.
 resource "aws_iam_role_policy_attachment" "mongo_vm_s3_full" {
   role       = aws_iam_role.mongo_vm.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
+// Instance profile used by the Mongo VM.
 resource "aws_iam_instance_profile" "mongo_vm" {
   name = "${var.name}-mongo-vm-profile"
   role = aws_iam_role.mongo_vm.name
 }
 
+// Security group for the Mongo VM.
 resource "aws_security_group" "mongo" {
   name   = "${var.name}-mongo-sg"
   vpc_id = aws_vpc.this.id
 
+  // Allow SSH from anywhere for the lab.
   ingress {
     description = "SSH open to internet (intentional)"
     from_port   = 22
@@ -104,6 +114,7 @@ resource "aws_security_group" "mongo" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  // Allow Mongo only from the private subnets.
   ingress {
     description = "Mongo from Kubernetes private subnets only"
     from_port   = 27017
@@ -112,6 +123,7 @@ resource "aws_security_group" "mongo" {
     cidr_blocks = aws_subnet.private[*].cidr_block
   }
 
+  // Allow all outbound traffic.
   egress {
     from_port   = 0
     to_port     = 0
@@ -120,10 +132,10 @@ resource "aws_security_group" "mongo" {
   }
 }
 
-# Ubuntu 20.04 (intentionally old)
+// Ubuntu 20.04 AMI for the lab.
 data "aws_ami" "ubuntu_2004" {
   most_recent = true
-  owners      = ["099720109477"] # Canonical
+  owners      = ["099720109477"] // Canonical
 
   filter {
     name   = "name"
@@ -136,6 +148,7 @@ data "aws_ami" "ubuntu_2004" {
   }
 }
 
+// MongoDB VM instance with user-data bootstrap.
 resource "aws_instance" "mongo" {
   ami                         = data.aws_ami.ubuntu_2004.id
   instance_type               = "t3.micro"
@@ -145,7 +158,7 @@ resource "aws_instance" "mongo" {
   iam_instance_profile        = aws_iam_instance_profile.mongo_vm.name
   associate_public_ip_address = true
 
-  # Ensure changes to bootstrap actually recreate the instance
+  // Recreate the instance when user data changes.
   user_data_replace_on_change = true
 
   user_data = templatefile("${path.module}/mongo_user_data.sh.tftpl", {

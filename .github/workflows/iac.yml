@@ -1,5 +1,6 @@
 name: iac-terraform-ci
 
+# Run on Terraform changes or manual dispatch.
 on:
   pull_request:
     branches: ["main"]
@@ -24,6 +25,7 @@ on:
 
 jobs:
   terraform_ci:
+    # Terraform CI for fmt, validate, scan, and plan.
     name: Terraform CI (fmt, validate, scan, plan)
     runs-on: ubuntu-latest
 
@@ -34,6 +36,7 @@ jobs:
       actions: read
 
     env:
+      # CI inputs and backend settings.
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
       EKS_CLUSTER_NAME: wiz-exercise
@@ -45,11 +48,9 @@ jobs:
       TFSTATE_KEY: ${{ secrets.TFSTATE_KEY }}
       TFLOCK_TABLE: ${{ secrets.TFLOCK_TABLE }}
 
-      # ✅ GitHub OIDC Terraform variables (FROM GitHub Variables)
       TF_VAR_github_org: ${{ vars.TF_GITHUB_ORG }}
       TF_VAR_github_repo: ${{ vars.TF_GITHUB_REPO }}
 
-      # ✅ Ensure CI matches existing deployed state (prevents CI-only "destroy" drift)
       TF_VAR_enable_securityhub: "true"
       TF_VAR_create_guardduty_detector: "true"
 
@@ -57,6 +58,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Validate required inputs early.
       - name: Fail fast if required inputs are missing
         shell: bash
         run: |
@@ -90,9 +92,11 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ secrets.AWS_REGION }}
 
+      # Install Terraform CLI.
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
 
+      # Format and validate Terraform configuration.
       - name: Terraform fmt (check)
         working-directory: terraform
         run: terraform fmt -check -recursive
@@ -111,17 +115,20 @@ jobs:
         working-directory: terraform
         run: terraform validate
 
+      # Configure kubeconfig for Kubernetes providers.
       - name: Configure kubeconfig for EKS (for providers)
         run: |
           aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
           kubectl version --client=true || true
 
+      # Install Trivy for IaC scanning.
       - name: Install Trivy
         run: |
           sudo apt-get update
           sudo apt-get install -y wget
           wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
 
+      # Run IaC scan and upload results.
       - name: Trivy IaC scan (SARIF)
         run: |
           trivy config terraform --format sarif --output trivy-iac.sarif
@@ -134,10 +141,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Generate a plan for review.
       - name: Terraform plan
         working-directory: terraform
         run: terraform plan -no-color -input=false
 
+      # Optional apply when manually dispatched.
       - name: Terraform apply (manual only)
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.tf_action == 'apply' }}
         working-directory: terraform
