@@ -122,7 +122,8 @@ jobs:
           terraform version
           terraform workspace show
           terraform workspace list
-          terraform state pull | head -n 20
+          terraform state pull > /tmp/tfstate.json
+          sed -n '1,20p' /tmp/tfstate.json
 
       - name: Terraform validate
         working-directory: terraform
