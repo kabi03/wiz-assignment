@@ -1,32 +1,32 @@
 // Terraform version and provider pins.
 terraform {
-  required_version = ">= 1.5.0"
+  required_version = "= 1.5.7"
 
   // Provider versions pinned for reproducible builds.
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = "= 5.100.0"
     }
     null = {
       source  = "hashicorp/null"
-      version = "~> 3.2"
+      version = "= 3.2.4"
     }
     tls = {
       source  = "hashicorp/tls"
-      version = "~> 4.0"
+      version = "= 4.1.0"
     }
     random = {
       source  = "hashicorp/random"
-      version = "~> 3.0"
+      version = "= 3.7.2"
     }
     kubernetes = {
       source  = "hashicorp/kubernetes"
-      version = "~> 2.0"
+      version = "= 2.38.0"
     }
     helm = {
       source  = "hashicorp/helm"
-      version = "~> 2.5.0"
+      version = "= 2.5.1"
     }
   }
 }

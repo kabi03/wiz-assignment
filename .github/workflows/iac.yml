@@ -95,6 +95,9 @@ jobs:
       # Install Terraform CLI.
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+          terraform_wrapper: false
 
       # Format and validate Terraform configuration.
       - name: Terraform fmt (check)
@@ -110,6 +113,16 @@ jobs:
             -backend-config="region=${AWS_REGION}" \
             -backend-config="dynamodb_table=${TFLOCK_TABLE}" \
             -backend-config="encrypt=true"
+
+      - name: Show Terraform version + workspace + state header
+        working-directory: terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform version
+          terraform workspace show
+          terraform workspace list
+          terraform state pull | head -n 20
 
       - name: Terraform validate
         working-directory: terraform
