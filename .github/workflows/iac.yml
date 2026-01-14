@@ -107,7 +107,7 @@ jobs:
       - name: Terraform init (remote backend)
         working-directory: terraform
         run: |
-          terraform init -reconfigure -input=false \
+          terraform init -reconfigure -input=false -lockfile=readonly \
             -backend-config="bucket=${TFSTATE_BUCKET}" \
             -backend-config="key=${TFSTATE_KEY}" \
             -backend-config="region=${AWS_REGION}" \

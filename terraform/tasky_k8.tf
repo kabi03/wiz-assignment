@@ -56,6 +56,12 @@ resource "kubernetes_secret" "tasky_env" {
   data = {
     MONGODB_URI = local.mongo_uri
   }
+
+  lifecycle {
+    ignore_changes = [
+      metadata,
+    ]
+  }
 }
 
 // Tasky application deployment.

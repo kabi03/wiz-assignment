@@ -22,6 +22,10 @@ resource "random_password" "mongo_app" {
 resource "tls_private_key" "ssh" {
   algorithm = "RSA"
   rsa_bits  = 4096
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 // Register the SSH public key with EC2.
