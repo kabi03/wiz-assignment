@@ -14,7 +14,7 @@ variable "kube_context" {
 
 // Use the local kubeconfig for Kubernetes provider access.
 provider "kubernetes" {
-  config_path    = pathexpand(var.kubeconfig_path)
+  config_path = pathexpand(var.kubeconfig_path)
   // Use the provided context if set, otherwise current-context.
   config_context = var.kube_context != "" ? var.kube_context : null
 }
@@ -22,7 +22,7 @@ provider "kubernetes" {
 // Use the same kubeconfig for Helm releases.
 provider "helm" {
   kubernetes {
-    config_path    = pathexpand(var.kubeconfig_path)
+    config_path = pathexpand(var.kubeconfig_path)
     // Match the same context as the Kubernetes provider.
     config_context = var.kube_context != "" ? var.kube_context : null
   }
