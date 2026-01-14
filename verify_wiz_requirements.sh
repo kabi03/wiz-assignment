@@ -13,12 +13,85 @@ DEPLOYMENT_NAME="${DEPLOYMENT_NAME:-tasky}"
 # Optional SSH key path for the Mongo VM.
 SSH_KEY_PATH="${SSH_KEY_PATH:-${TF_DIR}/mongo.pem}"
 
+# Optional log file path; when set, output is written to the file and echoed.
+OUTPUT_FILE="${OUTPUT_FILE:-}"
+
+# Optional command tracing to show verification commands as they run.
+SHOW_COMMANDS="${SHOW_COMMANDS:-0}"
+
 # Output helpers.
 hr() { echo "--------------------------------------------------------------------------------"; }
 h1() { hr; echo "## $*"; hr; }
-ok() { echo "OK: $*"; }
-warn() { echo "WARN: $*"; }
-die() { echo "ERROR: $*" >&2; exit 1; }
+
+PASSED_CHECKS=()
+FAILED_CHECKS=()
+WARNED_CHECKS=()
+
+ok() { echo "PASS: $*"; PASSED_CHECKS+=("$*"); }
+warn() { echo "NOT OK (WARN): $*"; WARNED_CHECKS+=("$*"); }
+fail() { echo "FAIL: $*" >&2; FAILED_CHECKS+=("$*"); }
+die() { fail "$*"; exit 1; }
+criteria() { echo "Pass criteria: $*"; }
+
+print_summary() {
+  local pass_count="${#PASSED_CHECKS[@]}"
+  local fail_count="${#FAILED_CHECKS[@]}"
+  local warn_count="${#WARNED_CHECKS[@]}"
+
+  hr
+  echo "## Pass/Fail Summary"
+  hr
+  echo "Passed: ${pass_count}"
+  echo "Failed: ${fail_count}"
+  echo "Warned: ${warn_count}"
+  echo
+
+  if (( fail_count > 0 )); then
+    echo "Failed checks:"
+    printf ' - %s\n' "${FAILED_CHECKS[@]}"
+    echo
+  else
+    echo "Failed checks: none"
+    echo
+  fi
+
+  if (( warn_count > 0 )); then
+    echo "Warned checks (not OK, non-fatal):"
+    printf ' - %s\n' "${WARNED_CHECKS[@]}"
+    echo
+  else
+    echo "Warned checks: none"
+    echo
+  fi
+
+  if (( pass_count > 0 )); then
+    echo "Passed checks:"
+    printf ' - %s\n' "${PASSED_CHECKS[@]}"
+  else
+    echo "Passed checks: none"
+  fi
+}
+
+trap 'print_summary' EXIT
+
+if [[ -n "${OUTPUT_FILE}" ]]; then
+  OUTPUT_DIR="$(dirname "${OUTPUT_FILE}")"
+  if [[ "${OUTPUT_DIR}" != "." ]]; then
+    mkdir -p "${OUTPUT_DIR}"
+  fi
+  if command -v tee >/dev/null 2>&1; then
+    exec > >(tee "${OUTPUT_FILE}") 2>&1
+  else
+    exec > "${OUTPUT_FILE}" 2>&1
+  fi
+  echo "Logging to ${OUTPUT_FILE}"
+fi
+
+if [[ "${SHOW_COMMANDS}" == "1" || "${SHOW_COMMANDS}" == "true" || "${SHOW_COMMANDS}" == "yes" ]]; then
+  export PS4='+ [CMD] '
+  set -x
+  echo "Command tracing enabled (SHOW_COMMANDS=${SHOW_COMMANDS})"
+fi
 
 # Verify a required CLI tool is installed.
 need() {
@@ -69,6 +142,11 @@ DevSecOps:
   - App pipeline with image scanning and deployment.
   - OIDC-based AWS access (no static keys).
 EOF
+echo
+echo "How to read PASS/FAIL:"
+echo " - PASS means the script could confirm the stated criteria for a check."
+echo " - NOT OK (WARN) means evidence could not be collected or was incomplete."
+echo " - FAIL means a required dependency or resource is missing and the script exits."
 
 # Read a Terraform output value if local state exists.
 tf_output() {
@@ -156,6 +234,7 @@ echo " - Daily automated backup to public-readable + listable S3 bucket (cron @ 
 
 # Evidence 1: Security group rules.
 h1 "Check: Security Group allows SSH from 0.0.0.0/0 and Mongo only from private subnets"
+criteria "SG output shows TCP 22 from 0.0.0.0/0 AND TCP 27017 only from private subnet CIDRs."
 
 if [[ -n "${MONGO_INSTANCE_ID}" ]]; then
   MONGO_SG_ID="$(
@@ -177,6 +256,7 @@ fi
 
 # Evidence 2: VM OS age and MongoDB version.
 h1 "Check: VM OS version and MongoDB version (SSH into VM)"
+criteria "SSH succeeds, OS shows Ubuntu 20.04 (or older), and mongod --version prints."
 
 if [[ -n "${MONGO_PUBLIC_IP}" && -f "${SSH_KEY_PATH}" ]]; then
   chmod 600 "${SSH_KEY_PATH}" || true
@@ -205,6 +285,7 @@ fi
 
 # Evidence 3: IAM permissions on the Mongo VM.
 h1 "Check: Mongo VM IAM instance profile has overly permissive policies (EC2FullAccess + S3FullAccess)"
+criteria "Attached role policies include AmazonEC2FullAccess AND AmazonS3FullAccess."
 
 if [[ -n "${MONGO_INSTANCE_ID}" ]]; then
   PROFILE_ARN="$(
@@ -233,6 +314,7 @@ fi
 
 # Evidence 4: Backup bucket is public.
 h1 "Check: S3 backup bucket is public-read + public-list (intentionally insecure)"
+criteria "Bucket policy status IsPublic=true, public access block is all false, and bucket policy allows s3:ListBucket and s3:GetObject to Principal '*'."
 
 # Find the backup bucket by its prefix.
 BACKUP_BUCKET="$(
@@ -264,6 +346,7 @@ fi
 
 # Evidence 5: Daily backup cron and logs.
 h1 "Check: Daily automated backup cron on Mongo VM + log file"
+criteria "Cron entry references wiz_mongo_backup.sh and log shows recent backup activity."
 
 if [[ -n "${MONGO_PUBLIC_IP}" && -f "${SSH_KEY_PATH}" ]]; then
   ssh -o StrictHostKeyChecking=no -i "${SSH_KEY_PATH}" "ubuntu@${MONGO_PUBLIC_IP}" \
@@ -296,6 +379,7 @@ echo " - Data persists in MongoDB"
 
 # Evidence 1: nodes in private subnets.
 h1 "Check: EKS nodes in PRIVATE subnets"
+criteria "Subnets show MapPublicIpOnLaunch=false (private subnets)."
 
 CLUSTER_JSON="$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$REGION" --output json)"
 echo "$CLUSTER_JSON" | jq '.cluster.resourcesVpcConfig | {subnetIds, endpointPublicAccess, endpointPrivateAccess, publicAccessCidrs}'
@@ -328,6 +412,7 @@ ok "EKS private subnet evidence collected (subnets should show MapPublicIpOnLaun
 
 # Evidence 2: Mongo URI provided via a secret.
 h1 "Check: MongoDB URI is provided via Kubernetes env var (secret) and visible in pod env"
+criteria "Deployment envFrom references secret tasky-env, secret includes MONGODB_URI, and pod env prints MONGODB_URI."
 
 kubectl -n "$K8S_NAMESPACE" get ns "$K8S_NAMESPACE" >/dev/null 2>&1 && ok "Namespace exists: ${K8S_NAMESPACE}" || warn "Namespace not found: ${K8S_NAMESPACE}"
 
@@ -346,12 +431,14 @@ ok "Mongo env var evidence collected"
 
 # Evidence 3: wizexercise.txt exists in the container.
 h1 "Check: /app/wizexercise.txt exists in running container and contains your name"
+criteria "/app/wizexercise.txt exists in the running container and contains your name."
 
 kubectl -n "$K8S_NAMESPACE" exec "$POD" -- cat /app/wizexercise.txt
 ok "wizexercise.txt evidence collected"
 
 # Show where wizexercise.txt is created in the Dockerfile.
 h1 "Check: wizexercise.txt is created at build time in tasky-main/Dockerfile"
+criteria "Dockerfile includes RUN/printf that writes /app/wizexercise.txt."
 
 if [[ -f "tasky-main/Dockerfile" ]]; then
   nl -ba tasky-main/Dockerfile | sed -n '1,120p'
@@ -363,6 +450,7 @@ fi
 
 # Evidence 4: cluster-admin binding for the service account.
 h1 "Check: ServiceAccount is bound to cluster-admin (ClusterRoleBinding)"
+criteria "ClusterRoleBinding exists and references the Tasky service account."
 
 kubectl get clusterrolebinding "${NAME}-tasky-cluster-admin" -o yaml | sed -n '1,200p' || true
 echo
@@ -372,12 +460,14 @@ ok "cluster-admin binding evidence collected"
 
 # Evidence 5: privileged container setting.
 h1 "Check: Container is privileged=true (intentional weakness)"
+criteria "Deployment securityContext shows privileged: true."
 
 kubectl -n "$K8S_NAMESPACE" get deploy "$DEPLOYMENT_NAME" -o json | jq '.spec.template.spec.containers[0].securityContext'
 ok "privileged container evidence collected"
 
 # Evidence 6: ingress and public load balancer.
 h1 "Check: Ingress exists and has public hostname (ALB)"
+criteria "Ingress has a hostname, ALB scheme is internet-facing, and HTTP returns a response."
 
 kubectl -n "$K8S_NAMESPACE" get ingress -o wide
 INGRESS_HOST="$(kubectl -n "$K8S_NAMESPACE" get ingress tasky-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)"
@@ -404,6 +494,7 @@ fi
 # Evidence 7: app writes and reads data from Mongo.
 # If the API differs, use the UI for proof.
 h1 "Check: App works end-to-end and persists data (web -> Mongo)"
+criteria "POST creates a todo and GET list includes it afterward."
 
 if [[ -n "${INGRESS_HOST}" ]]; then
   echo "Attempting API-based proof (best-effort). If your Tasky API differs, use browser UI proof instead."
@@ -423,6 +514,7 @@ fi
 
 # Optional: direct DB proof via kubectl exec.
 h1 "Optional: Direct DB proof via Kubernetes (if mongo client tools are available)"
+criteria "Optional: PASS if you can query Mongo directly from a pod and see data."
 
 echo "This is optional because many images don't ship mongo client tools."
 echo "A good live alternative: show app write -> refresh -> data persists."
@@ -430,6 +522,7 @@ echo
 
 # DevSecOps evidence for pipelines and controls.
 h1 "Dev(Sec)Ops - VCS + CI/CD pipelines + pipeline security controls"
+criteria "Workflow files show OIDC auth, Trivy scans, build/push, and deployment steps."
 
 echo "What this section checks (DevSecOps):"
 echo " - IaC pipeline with validation and security scanning"
@@ -460,6 +553,7 @@ ok "Dev(Sec)Ops workflow evidence printed"
 
 # Evidence for Cloud Native Security controls.
 h1 "Requirement: Cloud Native Security - control plane audit logging + preventative + detective controls"
+criteria "EKS logging includes api/audit, EBS encryption by default is enabled, and CloudTrail/AWS Config are enabled."
 
 echo "What this section checks (Cloud Native Security):"
 echo " - EKS control plane logging enabled"
