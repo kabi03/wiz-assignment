@@ -7,11 +7,13 @@ on:
     paths:
       - "terraform/**"
       - ".github/workflows/iac.yml"
+      - ".github/workflows/app.yml"
   push:
     branches: ["main"]
     paths:
       - "terraform/**"
       - ".github/workflows/iac.yml"
+      - ".github/workflows/app.yml"
   workflow_dispatch:
     inputs:
       tf_action:

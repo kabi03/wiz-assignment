@@ -15,7 +15,7 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  build_scan_push:
+  build_scan_push_deploy:
     # CI job for the Tasky image and deployment.
     runs-on: ubuntu-latest
 
@@ -81,16 +81,21 @@ jobs:
 
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             # PR run: local tags only (no AWS/ECR)
+            echo "ecr_registry=" >> "$GITHUB_OUTPUT"
             echo "repo_uri=local/${ECR_REPO}" >> "$GITHUB_OUTPUT"
             echo "image_sha=tasky:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             echo "image_latest=tasky:pr" >> "$GITHUB_OUTPUT"
           else
             # Deploy run: ECR tags (requires AWS auth)
             ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            REPO_URI="${ECR_REGISTRY}/${ECR_REPO}"
+
             echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
-            echo "repo_uri=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}" >> "$GITHUB_OUTPUT"
-            echo "image_sha=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
-            echo "image_latest=${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}:latest" >> "$GITHUB_OUTPUT"
+            echo "ecr_registry=${ECR_REGISTRY}" >> "$GITHUB_OUTPUT"
+            echo "repo_uri=${REPO_URI}" >> "$GITHUB_OUTPUT"
+            echo "image_sha=${REPO_URI}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "image_latest=${REPO_URI}:latest" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Login to Amazon ECR (podman)
@@ -98,7 +103,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          aws ecr get-login-password --region "${AWS_REGION}" | podman login --username AWS --password-stdin "${{ steps.vars.outputs.repo_uri }}"
+          aws ecr get-login-password --region "${AWS_REGION}" | podman login --username AWS --password-stdin "${{ steps.vars.outputs.ecr_registry }}"
 
       - name: Build image (podman)
         shell: bash
@@ -147,7 +152,7 @@ jobs:
   deploy:
     # Production deployment gate using GitHub Environments.
     if: github.event_name != 'pull_request'
-    needs: build_scan_push
+    needs: build_scan_push_deploy
     runs-on: ubuntu-latest
     environment: production
 
@@ -162,7 +167,7 @@ jobs:
       K8S_NAMESPACE: tasky
       DEPLOYMENT_NAME: tasky
       CONTAINER_NAME: tasky
-      IMAGE_SHA: ${{ needs.build_scan_push.outputs.image_sha }}
+      IMAGE_SHA: ${{ needs.build_scan_push_deploy.outputs.image_sha }}
 
     steps:
       - name: Configure AWS credentials (GitHub OIDC)
