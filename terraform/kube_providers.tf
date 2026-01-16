@@ -13,6 +13,7 @@ variable "kube_context" {
 }
 
 // Use the local kubeconfig for Kubernetes provider access.
+// This lets Terraform apply in-cluster resources after EKS is created.
 provider "kubernetes" {
   config_path = pathexpand(var.kubeconfig_path)
   // Use the provided context if set, otherwise current-context.

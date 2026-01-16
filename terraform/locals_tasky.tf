@@ -6,5 +6,6 @@ locals {
 
   // Connection string consumed by the Kubernetes secret.
   // Use authSource=admin because the user is created in the admin DB.
+  // Database name "go-mongodb" matches the app's default.
   mongo_uri = "mongodb://tasky:${local.mongo_app_password_uri}@${local.mongo_host}:27017/go-mongodb?authSource=admin"
 }

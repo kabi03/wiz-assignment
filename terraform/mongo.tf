@@ -4,6 +4,7 @@ resource "random_password" "mongo_admin" {
   special = true
 
   lifecycle {
+    // Keep credentials stable for repeatable demos.
     prevent_destroy = true
   }
 }
@@ -14,6 +15,7 @@ resource "random_password" "mongo_app" {
   special = true
 
   lifecycle {
+    // Avoid rotating the app password on accidental destroy.
     prevent_destroy = true
   }
 }
@@ -24,6 +26,7 @@ resource "tls_private_key" "ssh" {
   rsa_bits  = 4096
 
   lifecycle {
+    // Preserve the same SSH key unless explicitly rotated.
     prevent_destroy = true
   }
 }
@@ -37,6 +40,7 @@ resource "aws_key_pair" "mongo" {
 // Public S3 bucket used for lab backups.
 resource "aws_s3_bucket" "public_backups" {
   bucket_prefix = "${var.name}-public-backups-"
+  // Allow cleanup during lab teardown without manual emptying.
   force_destroy = true
 }
 
@@ -124,6 +128,7 @@ resource "aws_security_group" "mongo" {
     from_port   = 27017
     to_port     = 27017
     protocol    = "tcp"
+    // Lock Mongo to the private subnet CIDRs used by EKS nodes.
     cidr_blocks = aws_subnet.private[*].cidr_block
   }
 
@@ -165,6 +170,7 @@ resource "aws_instance" "mongo" {
   // Recreate the instance when user data changes.
   user_data_replace_on_change = true
 
+  // User data installs Mongo, creates users, and configures backups.
   user_data = templatefile("${path.module}/mongo_user_data.sh.tftpl", {
     mongo_admin_password = random_password.mongo_admin.result
     mongo_app_password   = random_password.mongo_app.result

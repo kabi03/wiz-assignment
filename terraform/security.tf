@@ -1,9 +1,11 @@
+// Current account ID used in bucket policies and log prefixes.
 data "aws_caller_identity" "current" {}
 
 // CloudTrail logging setup.
 // Private bucket for CloudTrail logs.
 resource "aws_s3_bucket" "cloudtrail_logs" {
   bucket_prefix = "${var.name}-cloudtrail-"
+  // Allow easy teardown of the lab environment.
   force_destroy = true
 }
 
@@ -79,6 +81,7 @@ resource "aws_cloudtrail" "this" {
   is_multi_region_trail         = true
   enable_log_file_validation    = true
 
+  // Capture management events for auditability.
   event_selector {
     read_write_type           = "All"
     include_management_events = true
@@ -123,6 +126,7 @@ resource "aws_iam_role_policy_attachment" "config" {
 // S3 bucket to store AWS Config snapshots and history.
 resource "aws_s3_bucket" "config_logs" {
   bucket_prefix = "${var.name}-config-"
+  // Allow cleanup during lab teardown.
   force_destroy = true
 }
 
@@ -214,6 +218,7 @@ resource "aws_config_configuration_recorder" "this" {
   name     = "${var.name}-recorder"
   role_arn = aws_iam_role.config.arn
 
+  // Record all supported resource types for the lab.
   recording_group {
     all_supported = true
   }

@@ -15,6 +15,7 @@ provider "aws" {
   region = "us-east-1"
 
   ignore_tags {
+    // Avoid diffs from AWS program tags.
     keys = ["aws-apn-id"]
   }
 }

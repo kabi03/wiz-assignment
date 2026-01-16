@@ -1,11 +1,13 @@
 variable "tasky_namespace" {
   type    = string
+  // Namespace used for all Tasky resources.
   default = "tasky"
 }
 
 variable "tasky_image_tag" {
   type        = string
   description = "Image tag to deploy from the Terraform-created ECR repo"
+  // CI updates the tag during deployments.
   default     = "latest"
 }
 
@@ -67,6 +69,7 @@ resource "kubernetes_deployment" "tasky" {
   }
 
   // Let CI control the image tag and ignore drift in Terraform.
+  // This prevents Terraform from fighting the CD pipeline.
   lifecycle {
     ignore_changes = [
       spec[0].template[0].spec[0].container[0].image
@@ -86,6 +89,7 @@ resource "kubernetes_deployment" "tasky" {
       }
 
       spec {
+        // Bind the service account with cluster-admin permissions (lab-only).
         service_account_name = kubernetes_service_account.tasky.metadata[0].name
 
         container {
@@ -104,6 +108,7 @@ resource "kubernetes_deployment" "tasky" {
           }
 
           // Run the container as privileged for the lab.
+          // This is intentionally insecure for the exercise.
           security_context {
             privileged = true
           }
@@ -141,6 +146,7 @@ resource "kubernetes_ingress_v1" "tasky" {
     namespace = kubernetes_namespace.tasky.metadata[0].name
 
     annotations = {
+      // Use the AWS Load Balancer Controller to provision an ALB.
       "kubernetes.io/ingress.class"           = "alb"
       "alb.ingress.kubernetes.io/scheme"      = "internet-facing"
       "alb.ingress.kubernetes.io/target-type" = "ip"

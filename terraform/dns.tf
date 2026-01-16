@@ -3,6 +3,7 @@ resource "aws_route53_zone" "tasky_internal" {
   name = "tasky.internal"
 
   // Associate the private zone with the VPC.
+  // This keeps the DNS name resolvable only inside the VPC.
   vpc {
     vpc_id = aws_vpc.this.id
   }

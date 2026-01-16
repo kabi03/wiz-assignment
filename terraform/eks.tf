@@ -63,6 +63,7 @@ resource "aws_eks_cluster" "this" {
   vpc_config {
     // Private subnets for node networking.
     subnet_ids              = aws_subnet.private[*].id
+    // Public API endpoint for lab access (restricted by CIDR list).
     endpoint_public_access  = true
     endpoint_private_access = false
     public_access_cidrs     = var.eks_public_access_cidrs
@@ -71,6 +72,7 @@ resource "aws_eks_cluster" "this" {
 
   // Use aws-auth ConfigMap for access control.
   access_config {
+    // Bootstrap creator admin so initial access is possible.
     authentication_mode                         = "CONFIG_MAP"
     bootstrap_cluster_creator_admin_permissions = true
   }

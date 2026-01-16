@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
+      # Minimum scopes for checkout, OIDC auth, and SARIF upload.
       contents: read
       id-token: write
       security-events: write
@@ -57,6 +58,7 @@ jobs:
       TF_VAR_create_guardduty_detector: "true"
 
     steps:
+      # Pull the repo so we can run Terraform against it.
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -88,6 +90,7 @@ jobs:
             exit 1
           fi
 
+      # Exchange GitHub OIDC token for temporary AWS credentials.
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -106,6 +109,7 @@ jobs:
         working-directory: terraform
         run: terraform fmt -check -recursive
 
+      # Initialize remote state and lock table configuration.
       - name: Terraform init (remote backend)
         working-directory: terraform
         run: |
@@ -116,6 +120,7 @@ jobs:
             -backend-config="dynamodb_table=${TFLOCK_TABLE}" \
             -backend-config="encrypt=true"
 
+      # Emit version and state metadata for auditability in CI logs.
       - name: Show Terraform version + workspace + state header
         working-directory: terraform
         shell: bash
@@ -127,6 +132,7 @@ jobs:
           terraform state pull > /tmp/tfstate.json
           sed -n '1,20p' /tmp/tfstate.json
 
+      # Validate configuration structure and provider wiring.
       - name: Terraform validate
         working-directory: terraform
         run: terraform validate
@@ -149,6 +155,7 @@ jobs:
         run: |
           trivy config terraform --format sarif --output trivy-iac.sarif
 
+      # Upload SARIF so findings show in the GitHub Security tab.
       - name: Upload Trivy SARIF artifact
         uses: actions/upload-artifact@v4
         with:

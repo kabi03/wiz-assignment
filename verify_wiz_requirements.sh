@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# Strict mode so failures are obvious during a live walkthrough.
 set -euo pipefail
 
 # Read-only evidence script for the Wiz exercise.
 # It prints proof for each requirement and does not change resources.
 
+# Configurable inputs with sensible defaults for the lab.
 REGION="${REGION:-us-east-1}"
 NAME="${NAME:-wiz-exercise}"
 TF_DIR="${TF_DIR:-terraform}"
@@ -19,10 +21,12 @@ OUTPUT_FILE="${OUTPUT_FILE:-}"
 # Optional command tracing to show verification commands as they run.
 SHOW_COMMANDS="${SHOW_COMMANDS:-0}"
 
+# Small output helpers for visual separation during the demo.
 # Output helpers.
 hr() { echo "--------------------------------------------------------------------------------"; }
 h1() { hr; echo "## $*"; hr; }
 
+# Track results for the end-of-script summary.
 PASSED_CHECKS=()
 FAILED_CHECKS=()
 WARNED_CHECKS=()
@@ -33,6 +37,7 @@ fail() { echo "FAIL: $*" >&2; FAILED_CHECKS+=("$*"); }
 die() { fail "$*"; exit 1; }
 criteria() { echo "Pass criteria: $*"; }
 
+# Final report printed regardless of exit path.
 print_summary() {
   local pass_count="${#PASSED_CHECKS[@]}"
   local fail_count="${#FAILED_CHECKS[@]}"
@@ -72,8 +77,10 @@ print_summary() {
   fi
 }
 
+# Always print a summary, even if we exit early.
 trap 'print_summary' EXIT
 
+# Optional log redirection to capture evidence in a file.
 if [[ -n "${OUTPUT_FILE}" ]]; then
   OUTPUT_DIR="$(dirname "${OUTPUT_FILE}")"
   if [[ "${OUTPUT_DIR}" != "." ]]; then
@@ -87,6 +94,7 @@ if [[ -n "${OUTPUT_FILE}" ]]; then
   echo "Logging to ${OUTPUT_FILE}"
 fi
 
+# Optional command tracing to show exactly what was executed.
 if [[ "${SHOW_COMMANDS}" == "1" || "${SHOW_COMMANDS}" == "true" || "${SHOW_COMMANDS}" == "yes" ]]; then
   export PS4='+ [CMD] '
   set -x
@@ -148,6 +156,7 @@ echo " - PASS means the script could confirm the stated criteria for a check."
 echo " - NOT OK (WARN) means evidence could not be collected or was incomplete."
 echo " - FAIL means a required dependency or resource is missing and the script exits."
 
+# Helper to read a Terraform output when local state exists.
 # Read a Terraform output value if local state exists.
 tf_output() {
   local key="$1"
@@ -158,6 +167,7 @@ tf_output() {
   fi
 }
 
+# Terraform outputs give us canonical IPs/hostnames if state is local.
 # Capture key Terraform outputs if present.
 MONGO_PUBLIC_IP="$(tf_output mongo_public_ip)"
 MONGO_PRIVATE_IP="$(tf_output mongo_private_ip)"
@@ -171,6 +181,7 @@ fi
 # Discover key resources by tags.
 h1 "Discover resources (read-only)"
 
+# Use tags to find the Mongo VM when Terraform state isn't local.
 # Find the Mongo instance by Name tag.
 MONGO_INSTANCE_ID="$(
   aws ec2 describe-instances --region "$REGION" \
@@ -203,6 +214,7 @@ else
   die "EKS Cluster not found: ${EKS_CLUSTER_NAME} (region ${REGION})"
 fi
 
+# Resolve a node group name for node/subnet evidence later.
 # Capture the first node group name for later checks.
 NODEGROUP_NAME="${NODEGROUP_NAME:-}"
 if [[ -z "${NODEGROUP_NAME}" ]]; then
@@ -215,6 +227,7 @@ else
   warn "No EKS node group found via list-nodegroups."
 fi
 
+# Validate kubeconfig access before Kubernetes-specific checks.
 # Update kubeconfig and verify kubectl works.
 h1 "Kubernetes CLI requirement: kubectl access"
 aws eks update-kubeconfig --name "$EKS_CLUSTER_NAME" --region "$REGION" >/dev/null

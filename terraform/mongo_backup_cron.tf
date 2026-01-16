@@ -3,6 +3,7 @@ resource "null_resource" "mongo_backup_cron" {
   depends_on = [aws_instance.mongo]
 
   // Re-run when instance, bucket, or script changes.
+  // This gives a simple idempotent trigger for the remote setup.
   triggers = {
     instance_id = aws_instance.mongo.id
     bucket      = aws_s3_bucket.public_backups.bucket

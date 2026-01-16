@@ -52,10 +52,12 @@ resource "aws_dynamodb_table" "tflock" {
 
 // Name of the state bucket for backend config.
 output "tfstate_bucket" {
+  // Used to populate terraform/backend.hcl or CI backend config.
   value = aws_s3_bucket.tfstate.bucket
 }
 
 // Name of the DynamoDB lock table for backend config.
 output "tflock_table" {
+  // Used to populate terraform/backend.hcl or CI backend config.
   value = aws_dynamodb_table.tflock.name
 }

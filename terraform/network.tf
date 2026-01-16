@@ -3,6 +3,7 @@ data "aws_availability_zones" "available" {}
 
 // Use the first two AZs for a simple multi-AZ layout.
 locals {
+  // Limit to two AZs to keep the lab simple and cheap.
   azs = slice(data.aws_availability_zones.available.names, 0, 2)
 }
 
@@ -33,6 +34,7 @@ resource "aws_subnet" "public" {
 
   tags = {
     Name                                = "${var.name}-public-${count.index}"
+    // Tag so Kubernetes can place public load balancers here.
     "kubernetes.io/role/elb"            = "1"
     "kubernetes.io/cluster/${var.name}" = "shared"
   }
@@ -47,6 +49,7 @@ resource "aws_subnet" "private" {
 
   tags = {
     Name                                = "${var.name}-private-${count.index}"
+    // Tag so Kubernetes can place internal load balancers here.
     "kubernetes.io/role/internal-elb"   = "1"
     "kubernetes.io/cluster/${var.name}" = "shared"
   }
@@ -61,6 +64,7 @@ resource "aws_eip" "nat" {
 // NAT gateway to let private subnets reach the internet.
 resource "aws_nat_gateway" "nat" {
   allocation_id = aws_eip.nat.id
+  // Place NAT in the first public subnet for outbound access.
   subnet_id     = aws_subnet.public[0].id
   tags          = { Name = "${var.name}-nat" }
 

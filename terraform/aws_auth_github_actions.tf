@@ -2,6 +2,7 @@
 
 // Look up the GitHub Actions role created by OIDC.
 data "aws_iam_role" "github_actions" {
+  // This role is defined in terraform/github_oidc.tf.
   name = "${var.name}-github-actions"
 }
 

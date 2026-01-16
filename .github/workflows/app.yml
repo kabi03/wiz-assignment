@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
+      # Checkout, OIDC auth, and SARIF upload permissions.
       contents: read
       id-token: write
       security-events: write
@@ -39,6 +40,7 @@ jobs:
       image_sha: ${{ steps.vars.outputs.image_sha }}
 
     steps:
+      # Get the application source and Dockerfile.
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -57,6 +59,7 @@ jobs:
             exit 1
           fi
 
+      # Assume the AWS role so we can use ECR/EKS in non-PR runs.
       - name: Configure AWS credentials (GitHub OIDC)
         if: github.event_name != 'pull_request'
         uses: aws-actions/configure-aws-credentials@v4
@@ -73,6 +76,7 @@ jobs:
           sudo apt-get install -y podman wget
           wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
 
+      # Compute image tags for PR vs deploy runs.
       - name: Set image variables
         id: vars
         shell: bash
@@ -98,6 +102,7 @@ jobs:
             echo "image_latest=${REPO_URI}:latest" >> "$GITHUB_OUTPUT"
           fi
 
+      # Authenticate podman to ECR for push-capable runs.
       - name: Login to Amazon ECR (podman)
         if: github.event_name != 'pull_request'
         shell: bash
@@ -105,12 +110,14 @@ jobs:
           set -euo pipefail
           aws ecr get-login-password --region "${AWS_REGION}" | podman login --username AWS --password-stdin "${{ steps.vars.outputs.ecr_registry }}"
 
+      # Build the container image from tasky-main/Dockerfile.
       - name: Build image (podman)
         shell: bash
         run: |
           set -euo pipefail
           podman build -t "${{ steps.vars.outputs.image_sha }}" -t "${{ steps.vars.outputs.image_latest }}" tasky-main
 
+      # Save as an archive so Trivy can scan without registry access.
       - name: Save image to archive (for Trivy)
         shell: bash
         run: |
@@ -125,6 +132,7 @@ jobs:
           set -euo pipefail
           trivy image --input image.tar --format sarif --output trivy-image.sarif
 
+      # Upload SARIF so findings show in the GitHub Security tab.
       - name: Upload Trivy SARIF artifact
         uses: actions/upload-artifact@v4
         with:
@@ -170,6 +178,7 @@ jobs:
       IMAGE_SHA: ${{ needs.build_scan_push_deploy.outputs.image_sha }}
 
     steps:
+      # Assume the same role as build job to deploy to EKS.
       - name: Configure AWS credentials (GitHub OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -184,6 +193,7 @@ jobs:
           aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
           kubectl version --client=true
 
+      # Update the deployment image and wait for rollout.
       # Update the deployment to the new image.
       - name: Deploy updated image to Kubernetes
         shell: bash

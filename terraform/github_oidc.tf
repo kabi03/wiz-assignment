@@ -31,6 +31,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 resource "aws_iam_role" "github_actions" {
   count = var.enable_github_oidc ? 1 : 0
 
+  // Role name referenced by the GitHub workflow secrets.
   name = "${var.name}-github-actions"
 
   assume_role_policy = jsonencode({

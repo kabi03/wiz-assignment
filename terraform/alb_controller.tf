@@ -1,6 +1,7 @@
 // EKS OIDC provider used by IRSA.
 
 resource "aws_iam_openid_connect_provider" "eks" {
+  // STS audience used for service account token exchange.
   client_id_list = ["sts.amazonaws.com"]
 
   // Thumbprint used to validate the OIDC issuer.
@@ -23,6 +24,7 @@ data "aws_iam_policy_document" "alb_assume_role" {
 
     condition {
       test     = "StringEquals"
+      // Limit role assumption to the controller's service account.
       variable = "${replace(aws_eks_cluster.this.identity[0].oidc[0].issuer, "https://", "")}:sub"
       values   = ["system:serviceaccount:kube-system:aws-load-balancer-controller"]
     }
@@ -43,6 +45,7 @@ resource "aws_iam_policy" "alb_controller" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
+      // Based on AWS recommended policy for the controller.
 
       // Allow ELB service-linked role creation when required.
       {
@@ -212,6 +215,7 @@ resource "aws_iam_role_policy_attachment" "alb_controller" {
 
 // Install the ALB controller via Helm.
 
+// Release installs the controller into the cluster and wires IRSA.
 // Deploy the controller chart into kube-system.
 resource "helm_release" "alb_controller" {
   name       = "aws-load-balancer-controller"

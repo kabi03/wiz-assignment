@@ -1,4 +1,5 @@
 #!/bin/bash
+# Strict mode to surface errors during instance bootstrap.
 set -euxo pipefail
 
 # Log user-data output for troubleshooting.
@@ -7,6 +8,7 @@ echo "[user-data] start $(date -Is)"
 
 export DEBIAN_FRONTEND=noninteractive
 
+# Injected secrets and bucket name from Terraform template variables.
 ADMIN_PW='${mongo_admin_password}'
 APP_PW='${mongo_app_password}'
 BACKUP_BUCKET='${public_backup_bucket}'
@@ -15,6 +17,7 @@ BACKUP_BUCKET='${public_backup_bucket}'
 apt-get update -y
 apt-get install -y ca-certificates curl gnupg lsb-release awscli cron
 
+# Add the MongoDB 4.4 apt repo (intentionally older for the lab).
 # Install MongoDB 4.4 repo.
 curl -fsSL https://pgp.mongodb.com/server-4.4.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-4.4.gpg
 echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-4.4.gpg ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" \
@@ -24,6 +27,7 @@ echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-4.4.gpg ] https://repo.
 apt-get update -y
 apt-get install -y mongodb-org
 
+# Configure mongod for auth + bind to all interfaces (lab requirement).
 # Write mongod.conf with auth enabled and listen on all interfaces.
 cat >/etc/mongod.conf <<'EOF'
 storage:
@@ -47,11 +51,13 @@ security:
   authorization: enabled
 EOF
 
+# Start MongoDB and ensure it is running.
 # Enable and start MongoDB.
 systemctl daemon-reload
 systemctl enable mongod
 systemctl restart mongod
 
+# Wait for the database port to be open before attempting auth/user creation.
 # Wait for MongoDB to listen on the port.
 echo "[user-data] waiting for mongod to listen on 27017..."
 for i in $(seq 1 60); do
@@ -69,6 +75,7 @@ if ! ss -lntp | grep -q ':27017'; then
   exit 1
 fi
 
+# Wait for the server to respond to a ping to avoid race conditions.
 # Wait for MongoDB to respond to a ping.
 echo "[user-data] waiting for mongod ping..."
 for i in $(seq 1 60); do
@@ -79,6 +86,7 @@ for i in $(seq 1 60); do
   sleep 2
 done
 
+# Bootstrap an admin user using the localhost exception.
 # Create the admin user via the localhost exception.
 cat >/tmp/bootstrap-admin.js <<'JS'
 try {
@@ -102,6 +110,7 @@ JS
 
 mongo --quiet admin --eval "var ADMIN_PW='${mongo_admin_password}';" /tmp/bootstrap-admin.js
 
+# Create/update the app user with read/write access to the app database.
 # Create or update the tasky app user.
 cat >/tmp/bootstrap-tasky.js <<'JS'
 const admin = db.getSiblingDB("admin");
@@ -136,12 +145,14 @@ JS
 
 mongo --quiet admin --eval "var ADMIN_PW='${mongo_admin_password}'; var APP_PW='${mongo_app_password}';" /tmp/bootstrap-tasky.js
 
+# Sanity check local auth using the new app credentials.
 # Validate the tasky login locally.
 echo "[user-data] validating tasky auth locally..."
 mongo --quiet "mongodb://tasky:${mongo_app_password}@127.0.0.1:27017/go-mongodb?authSource=admin" \
   --eval 'db.runCommand({ping:1}).ok' | grep -q '^1$'
 echo "[user-data] tasky auth validated"
 
+# Install a backup script and cron entry that uploads to S3.
 # Install local backup script for the lab.
 cat > /usr/local/bin/mongo_backup.sh <<SCRIPT
 #!/bin/bash
@@ -156,6 +167,7 @@ aws s3 cp "/tmp/mongodump-\$TS.tgz" "s3://$BACKUP_BUCKET/mongodump-\$TS.tgz"
 SCRIPT
 chmod +x /usr/local/bin/mongo_backup.sh
 
+# Configure a daily cron schedule and restart cron.
 echo "0 2 * * * root /usr/local/bin/mongo_backup.sh" > /etc/cron.d/mongo_backup
 chmod 0644 /etc/cron.d/mongo_backup
 systemctl restart cron

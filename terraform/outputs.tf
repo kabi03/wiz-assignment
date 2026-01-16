@@ -26,6 +26,7 @@ output "mongo_uri" {
 
 // ALB hostname created by the Kubernetes ingress.
 output "tasky_ingress_hostname" {
+  // Use try() so terraform output works before ingress is ready.
   value = try(kubernetes_ingress_v1.tasky.status[0].load_balancer[0].ingress[0].hostname, null)
 }
 
