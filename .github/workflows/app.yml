@@ -1,4 +1,4 @@
-name: app-build-scan-push-deploy
+name: app-build-scan-push
 
 # Build, scan, push, and (optionally) deploy the app image.
 on:
