@@ -1,6 +1,6 @@
 name: app-build-scan-push-deploy
 
-# Build, scan, push, and deploy the app image.
+# Build, scan, push, and (optionally) deploy the app image.
 on:
   pull_request:
     branches: ["main"]
@@ -21,10 +21,11 @@ on:
         type: choice
         options:
           - "true"
+          - "false"
 
 jobs:
   build_scan_push_deploy:
-    # CI job for the Tasky image.
+    # CI job for the Tasky image and optional deployment.
     runs-on: ubuntu-latest
 
     permissions:
@@ -34,7 +35,7 @@ jobs:
       actions: read
 
     env:
-      # Runtime inputs for build steps.
+      # Runtime inputs for build and deploy steps.
       AWS_REGION: ${{ secrets.AWS_REGION }}
       EKS_CLUSTER_NAME: wiz-exercise
       ECR_REPO: wiz-exercise-tasky
@@ -42,15 +43,11 @@ jobs:
       DEPLOYMENT_NAME: tasky
       CONTAINER_NAME: tasky
 
-    outputs:
-      # Pass the image tag to the deploy job.
-      image_sha: ${{ steps.export.outputs.image_sha }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Validate required secrets.
+      # Validate required secrets (only required when we talk to AWS).
       - name: Fail fast if required secrets are missing
         if: github.event_name != 'pull_request'
         shell: bash
@@ -94,42 +91,39 @@ jobs:
             echo "image_sha=tasky:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             echo "image_latest=tasky:pr" >> "$GITHUB_OUTPUT"
           else
-            # Main branch build: ECR tags
+            # Main branch build: ECR tags (requires AWS auth)
             ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
             ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
             REPO_URI="${ECR_REGISTRY}/${ECR_REPO}"
 
-            echo "account_id=$ACCOUNT_ID" >> "$GITHUB_OUTPUT"
             echo "ecr_registry=${ECR_REGISTRY}" >> "$GITHUB_OUTPUT"
             echo "repo_uri=${REPO_URI}" >> "$GITHUB_OUTPUT"
             echo "image_sha=${REPO_URI}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
             echo "image_latest=${REPO_URI}:latest" >> "$GITHUB_OUTPUT"
           fi
 
-      # Export image SHA for downstream deploy job
-      - name: Export image sha
-        id: export
+      # Store the image reference as an env var for later steps in THIS job (no job outputs).
+      - name: Export image sha (job env)
+        if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          echo "image_sha=${{ steps.vars.outputs.image_sha }}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_SHA=${{ steps.vars.outputs.image_sha }}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=${{ steps.vars.outputs.image_latest }}" >> "$GITHUB_ENV"
+          echo "ECR_REGISTRY=${{ steps.vars.outputs.ecr_registry }}" >> "$GITHUB_ENV"
 
       - name: Login to Amazon ECR (podman)
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          aws ecr get-login-password --region "${AWS_REGION}" \
-            | podman login --username AWS --password-stdin "${{ steps.vars.outputs.ecr_registry }}"
+          aws ecr get-login-password --region "${AWS_REGION}" | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
 
       - name: Build image (podman)
         shell: bash
         run: |
           set -euo pipefail
-          podman build \
-            -t "${{ steps.vars.outputs.image_sha }}" \
-            -t "${{ steps.vars.outputs.image_latest }}" \
-            tasky-main
+          podman build -t "${{ steps.vars.outputs.image_sha }}" -t "${{ steps.vars.outputs.image_latest }}" tasky-main
 
       - name: Save image to archive (for Trivy)
         shell: bash
@@ -152,74 +146,35 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      # Show scan output in logs.
+      - name: Trivy scan image archive (table)
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image --input image.tar --format table
+
       # Push both SHA and latest tags.
       - name: Push image to ECR (podman)
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          podman push "${{ steps.vars.outputs.image_sha }}"
-          podman push "${{ steps.vars.outputs.image_latest }}"
+          podman push "${IMAGE_SHA}"
+          podman push "${IMAGE_LATEST}"
 
-  deploy:
-    # Production deployment (manual only).
-    if: github.event_name == 'workflow_dispatch'
-    needs: build_scan_push_deploy
-    runs-on: ubuntu-latest
-    environment: production
-
-    permissions:
-      id-token: write
-      contents: read
-
-    env:
-      # Runtime inputs for deploy steps.
-      AWS_REGION: ${{ secrets.AWS_REGION }}
-      EKS_CLUSTER_NAME: wiz-exercise
-      K8S_NAMESPACE: tasky
-      DEPLOYMENT_NAME: tasky
-      CONTAINER_NAME: tasky
-      IMAGE_SHA: ${{ needs.build_scan_push_deploy.outputs.image_sha }}
-
-    steps:
-      - name: Configure AWS credentials (GitHub OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
-          aws-region: ${{ secrets.AWS_REGION }}
-
-      # Configure kubectl for the target cluster.
-      - name: Configure kubeconfig for EKS
+      # Deploy only when manually dispatched and deploy=true
+      - name: Deploy updated image to Kubernetes
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
-          kubectl version --client=true
+          kubectl -n "${K8S_NAMESPACE}" set image "deployment/${DEPLOYMENT_NAME}" "${CONTAINER_NAME}=${IMAGE_SHA}"
+          kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=180s
 
-      # Validate image input
-      - name: Validate image input
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${IMAGE_SHA}" ]; then
-            echo "IMAGE_SHA is empty; build job output did not propagate."
-            exit 1
-          fi
-
-      # Update the deployment to the new image.
-      - name: Deploy updated image to Kubernetes
-        shell: bash
-        run: |
-          set -euo pipefail
-          kubectl -n "${K8S_NAMESPACE}" set image \
-            "deployment/${DEPLOYMENT_NAME}" \
-            "${CONTAINER_NAME}=${IMAGE_SHA}"
-          kubectl -n "${K8S_NAMESPACE}" rollout status \
-            "deployment/${DEPLOYMENT_NAME}" \
-            --timeout=180s
-
-      # Verify the file generated during the image build.
+      # Verify the file generated during the image build (only after deploy)
       - name: Verify wizexercise.txt in running pod
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
