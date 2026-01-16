@@ -1,0 +1,191 @@
+name: app-build-scan-push-deploy
+
+# Build, scan, push, and (optionally) deploy the app image.
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "tasky-main/**"
+      - ".github/workflows/app.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "tasky-main/**"
+      - ".github/workflows/app.yml"
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy image to production"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+
+jobs:
+  build_scan_push_deploy:
+    # CI job for the Tasky image and optional deployment.
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+
+    env:
+      # Runtime inputs for build and deploy steps.
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      EKS_CLUSTER_NAME: wiz-exercise
+      ECR_REPO: wiz-exercise-tasky
+      K8S_NAMESPACE: tasky
+      DEPLOYMENT_NAME: tasky
+      CONTAINER_NAME: tasky
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Validate required secrets (only required when we talk to AWS).
+      - name: Fail fast if required secrets are missing
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.AWS_REGION }}" ]; then
+            echo "Missing required secret: AWS_REGION"
+            exit 1
+          fi
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+
+      # Use GitHub OIDC to assume AWS role (no static credentials).
+      - name: Configure AWS credentials (GitHub OIDC)
+        if: github.event_name != 'pull_request'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Install podman and Trivy on the runner.
+      - name: Install dependencies (podman + trivy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y podman wget
+          wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      # Determine image tags based on event type (PR vs main).
+      - name: Set image variables
+        id: vars
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR run: local tags only (no AWS/ECR interaction)
+            echo "ecr_registry=" >> "$GITHUB_OUTPUT"
+            echo "repo_uri=local/${ECR_REPO}" >> "$GITHUB_OUTPUT"
+            echo "image_sha=tasky:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "image_latest=tasky:pr" >> "$GITHUB_OUTPUT"
+          else
+            # Main branch build: tag image for ECR
+            ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+            ECR_REGISTRY="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+            REPO_URI="${ECR_REGISTRY}/${ECR_REPO}"
+
+            echo "ecr_registry=${ECR_REGISTRY}" >> "$GITHUB_OUTPUT"
+            echo "repo_uri=${REPO_URI}" >> "$GITHUB_OUTPUT"
+            echo "image_sha=${REPO_URI}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+            echo "image_latest=${REPO_URI}:latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Persist image references for later steps in this job.
+      - name: Export image sha (job env)
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "IMAGE_SHA=${{ steps.vars.outputs.image_sha }}" >> "$GITHUB_ENV"
+          echo "IMAGE_LATEST=${{ steps.vars.outputs.image_latest }}" >> "$GITHUB_ENV"
+          echo "ECR_REGISTRY=${{ steps.vars.outputs.ecr_registry }}" >> "$GITHUB_ENV"
+
+      # Authenticate podman to ECR using temporary AWS credentials.
+      - name: Login to Amazon ECR (podman)
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws ecr get-login-password --region "${AWS_REGION}" | podman login --username AWS --password-stdin "${ECR_REGISTRY}"
+
+      # Build image and embed Git commit SHA into the container.
+      - name: Build image (podman)
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman build \
+            --build-arg GIT_SHA="${GITHUB_SHA}" \
+            -t "${{ steps.vars.outputs.image_sha }}" \
+            -t "${{ steps.vars.outputs.image_latest }}" \
+            tasky-main
+
+      # Save image locally so Trivy can scan without pulling from a registry.
+      - name: Save image to archive (for Trivy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman save --format docker-archive -o image.tar "${{ steps.vars.outputs.image_sha }}"
+
+      # Scan image and emit SARIF for security tooling.
+      - name: Trivy scan image archive (SARIF)
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image --input image.tar --format sarif --output trivy-image.sarif
+
+      - name: Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-sarif
+          path: trivy-image.sarif
+          if-no-files-found: error
+          retention-days: 7
+
+      # Human-readable vulnerability output for pipeline logs.
+      - name: Trivy scan image archive (table)
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy image --input image.tar --format table
+
+      # Push immutable (SHA) and mutable (latest) tags.
+      - name: Push image to ECR (podman)
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          set -euo pipefail
+          podman push "${IMAGE_SHA}"
+          podman push "${IMAGE_LATEST}"
+
+      # Deploy only when manually triggered and explicitly approved.
+      - name: Deploy updated image to Kubernetes
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+          kubectl -n "${K8S_NAMESPACE}" set image "deployment/${DEPLOYMENT_NAME}" "${CONTAINER_NAME}=${IMAGE_SHA}"
+          kubectl -n "${K8S_NAMESPACE}" rollout status "deployment/${DEPLOYMENT_NAME}" --timeout=180s
+
+      # Verify build metadata inside the running container.
+      - name: Verify wizexercise.txt in running pod
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.deploy == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          POD="$(kubectl -n "${K8S_NAMESPACE}" get pods -l app="${DEPLOYMENT_NAME}" -o jsonpath='{.items[0].metadata.name}')"
+          kubectl -n "${K8S_NAMESPACE}" exec "${POD}" -- cat /app/wizexercise.txt

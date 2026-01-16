@@ -1,0 +1,163 @@
+#!/bin/bash
+set -euxo pipefail
+
+# Log user-data output for troubleshooting.
+exec > >(tee -a /var/log/user-data.log) 2>&1
+echo "[user-data] start $(date -Is)"
+
+export DEBIAN_FRONTEND=noninteractive
+
+ADMIN_PW='${mongo_admin_password}'
+APP_PW='${mongo_app_password}'
+BACKUP_BUCKET='${public_backup_bucket}'
+
+# Install base packages required for Mongo and backups.
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg lsb-release awscli cron
+
+# Install MongoDB 4.4 repo.
+curl -fsSL https://pgp.mongodb.com/server-4.4.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-4.4.gpg
+echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-4.4.gpg ] https://repo.mongodb.org/apt/ubuntu focal/mongodb-org/4.4 multiverse" \
+  > /etc/apt/sources.list.d/mongodb-org-4.4.list
+
+# Install MongoDB from the added repo.
+apt-get update -y
+apt-get install -y mongodb-org
+
+# Write mongod.conf with auth enabled and listen on all interfaces.
+cat >/etc/mongod.conf <<'EOF'
+storage:
+  dbPath: /var/lib/mongodb
+  journal:
+    enabled: true
+
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+
+net:
+  port: 27017
+  bindIp: 0.0.0.0
+
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
+
+security:
+  authorization: enabled
+EOF
+
+# Enable and start MongoDB.
+systemctl daemon-reload
+systemctl enable mongod
+systemctl restart mongod
+
+# Wait for MongoDB to listen on the port.
+echo "[user-data] waiting for mongod to listen on 27017..."
+for i in $(seq 1 60); do
+  if ss -lntp | grep -q ':27017'; then
+    echo "[user-data] mongod is listening"
+    break
+  fi
+  sleep 2
+done
+
+if ! ss -lntp | grep -q ':27017'; then
+  echo "[user-data] ERROR: mongod is not listening on 27017"
+  systemctl status mongod --no-pager || true
+  tail -n 200 /var/log/mongodb/mongod.log || true
+  exit 1
+fi
+
+# Wait for MongoDB to respond to a ping.
+echo "[user-data] waiting for mongod ping..."
+for i in $(seq 1 60); do
+  if mongo --quiet --eval 'db.runCommand({ping:1}).ok' admin 2>/dev/null | grep -q '^1$'; then
+    echo "[user-data] mongod ping ok"
+    break
+  fi
+  sleep 2
+done
+
+# Create the admin user via the localhost exception.
+cat >/tmp/bootstrap-admin.js <<'JS'
+try {
+  db.getSiblingDB("admin").createUser({
+    user: "admin",
+    pwd: ADMIN_PW,
+    roles: [ { role: "root", db: "admin" } ],
+    mechanisms: ["SCRAM-SHA-256", "SCRAM-SHA-1"]
+  });
+  print("[bootstrap] created admin user");
+} catch (e) {
+  // User exists, continue.
+  if (String(e).includes("already exists")) {
+    print("[bootstrap] admin user already exists");
+  } else {
+    print("[bootstrap] ERROR creating admin user: " + e);
+    quit(1);
+  }
+}
+JS
+
+mongo --quiet admin --eval "var ADMIN_PW='${mongo_admin_password}';" /tmp/bootstrap-admin.js
+
+# Create or update the tasky app user.
+cat >/tmp/bootstrap-tasky.js <<'JS'
+const admin = db.getSiblingDB("admin");
+
+if (!admin.auth("admin", ADMIN_PW)) {
+  print("[bootstrap] ERROR: admin auth failed");
+  quit(1);
+}
+
+try {
+  admin.createUser({
+    user: "tasky",
+    pwd: APP_PW,
+    roles: [ { role: "readWrite", db: "go-mongodb" } ],
+    mechanisms: ["SCRAM-SHA-256", "SCRAM-SHA-1"]
+  });
+  print("[bootstrap] created tasky user");
+} catch (e) {
+  if (String(e).includes("already exists")) {
+    admin.updateUser("tasky", {
+      pwd: APP_PW,
+      roles: [ { role: "readWrite", db: "go-mongodb" } ],
+      mechanisms: ["SCRAM-SHA-256", "SCRAM-SHA-1"]
+    });
+    print("[bootstrap] updated tasky user");
+  } else {
+    print("[bootstrap] ERROR creating/updating tasky user: " + e);
+    quit(1);
+  }
+}
+JS
+
+mongo --quiet admin --eval "var ADMIN_PW='${mongo_admin_password}'; var APP_PW='${mongo_app_password}';" /tmp/bootstrap-tasky.js
+
+# Validate the tasky login locally.
+echo "[user-data] validating tasky auth locally..."
+mongo --quiet "mongodb://tasky:${mongo_app_password}@127.0.0.1:27017/go-mongodb?authSource=admin" \
+  --eval 'db.runCommand({ping:1}).ok' | grep -q '^1$'
+echo "[user-data] tasky auth validated"
+
+# Install local backup script for the lab.
+cat > /usr/local/bin/mongo_backup.sh <<SCRIPT
+#!/bin/bash
+set -euo pipefail
+TS=\$(date +%F)
+OUT="/tmp/mongodump-\$TS"
+rm -rf "\$OUT"
+mkdir -p "\$OUT"
+mongodump --username tasky --password '${mongo_app_password}' --authenticationDatabase admin --out "\$OUT"
+tar -czf "/tmp/mongodump-\$TS.tgz" -C /tmp "mongodump-\$TS"
+aws s3 cp "/tmp/mongodump-\$TS.tgz" "s3://$BACKUP_BUCKET/mongodump-\$TS.tgz"
+SCRIPT
+chmod +x /usr/local/bin/mongo_backup.sh
+
+echo "0 2 * * * root /usr/local/bin/mongo_backup.sh" > /etc/cron.d/mongo_backup
+chmod 0644 /etc/cron.d/mongo_backup
+systemctl restart cron
+
+echo "[user-data] done $(date -Is)"

@@ -1,0 +1,169 @@
+name: iac-terraform-ci
+
+# Run on Terraform changes or manual dispatch.
+on:
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/iac.yml"
+      - ".github/workflows/app.yml"
+  push:
+    branches: ["main"]
+    paths:
+      - "terraform/**"
+      - ".github/workflows/iac.yml"
+      - ".github/workflows/app.yml"
+  workflow_dispatch:
+    inputs:
+      tf_action:
+        description: "Terraform action (plan or apply)"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+
+jobs:
+  terraform_ci:
+    # Terraform CI for fmt, validate, scan, and plan.
+    name: Terraform CI (fmt, validate, scan, plan)
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+      actions: read
+
+    env:
+      # CI inputs and backend settings.
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_DEFAULT_REGION: ${{ secrets.AWS_REGION }}
+      EKS_CLUSTER_NAME: wiz-exercise
+
+      TF_IN_AUTOMATION: "true"
+      TF_INPUT: "false"
+
+      TFSTATE_BUCKET: ${{ secrets.TFSTATE_BUCKET }}
+      TFSTATE_KEY: ${{ secrets.TFSTATE_KEY }}
+      TFLOCK_TABLE: ${{ secrets.TFLOCK_TABLE }}
+
+      TF_VAR_github_org: ${{ vars.TF_GITHUB_ORG }}
+      TF_VAR_github_repo: ${{ vars.TF_GITHUB_REPO }}
+
+      TF_VAR_enable_securityhub: "true"
+      TF_VAR_create_guardduty_detector: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Validate required inputs early.
+      - name: Fail fast if required inputs are missing
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for v in AWS_REGION TFSTATE_BUCKET TFSTATE_KEY TFLOCK_TABLE; do
+            if [ -z "${!v:-}" ]; then
+              echo "Missing required env: $v"
+              exit 1
+            fi
+          done
+
+          if [ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]; then
+            echo "Missing required secret: AWS_ROLE_TO_ASSUME"
+            exit 1
+          fi
+
+          if [ -z "${{ vars.TF_GITHUB_ORG }}" ]; then
+            echo "Missing required variable: TF_GITHUB_ORG"
+            exit 1
+          fi
+
+          if [ -z "${{ vars.TF_GITHUB_REPO }}" ]; then
+            echo "Missing required variable: TF_GITHUB_REPO"
+            exit 1
+          fi
+
+      - name: Configure AWS credentials (GitHub OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Install Terraform CLI.
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.5.7
+          terraform_wrapper: false
+
+      # Format and validate Terraform configuration.
+      - name: Terraform fmt (check)
+        working-directory: terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init (remote backend)
+        working-directory: terraform
+        run: |
+          terraform init -reconfigure -input=false -lockfile=readonly \
+            -backend-config="bucket=${TFSTATE_BUCKET}" \
+            -backend-config="key=${TFSTATE_KEY}" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="dynamodb_table=${TFLOCK_TABLE}" \
+            -backend-config="encrypt=true"
+
+      - name: Show Terraform version + workspace + state header
+        working-directory: terraform
+        shell: bash
+        run: |
+          set -euo pipefail
+          terraform version
+          terraform workspace show
+          terraform workspace list
+          terraform state pull > /tmp/tfstate.json
+          sed -n '1,20p' /tmp/tfstate.json
+
+      - name: Terraform validate
+        working-directory: terraform
+        run: terraform validate
+
+      # Configure kubeconfig for Kubernetes providers.
+      - name: Configure kubeconfig for EKS (for providers)
+        run: |
+          aws eks update-kubeconfig --name "${EKS_CLUSTER_NAME}" --region "${AWS_REGION}"
+          kubectl version --client=true || true
+
+      # Install Trivy for IaC scanning.
+      - name: Install Trivy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget
+          wget -qO- https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+      # Run IaC scan and upload results.
+      - name: Trivy IaC scan (SARIF)
+        run: |
+          trivy config terraform --format sarif --output trivy-iac.sarif
+
+      - name: Upload Trivy SARIF artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-iac-sarif
+          path: trivy-iac.sarif
+          if-no-files-found: error
+          retention-days: 7
+
+      # Generate a plan for review.
+      - name: Terraform plan
+        working-directory: terraform
+        run: terraform plan -no-color -input=false
+
+      # Optional apply when manually dispatched.
+      - name: Terraform apply (manual only)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.tf_action == 'apply' }}
+        working-directory: terraform
+        run: terraform apply -auto-approve -input=false
